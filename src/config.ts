@@ -28,6 +28,7 @@ export type Config = {
     maxQueue: number
     maxReplayBytes: number
     mirrorBase: string
+    mirrorDownloadPath: string
     mirrorUserAgent: string
     videosDir: string
     songsDir: string
@@ -79,6 +80,10 @@ export function loadConfig(): Config {
         maxQueue: Math.max(1, Math.floor(num("RENDER_MAX_QUEUE", 20))),
         maxReplayBytes: Math.max(1, num("RENDER_MAX_REPLAY_MB", 16)) * 1024 * 1024,
         mirrorBase: str("MIRROR_BASE", "http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100").replace(/\/+$/, ""),
+        // The route that STREAMS the .osz. On the hinai mirror that is the
+        // CheeseGull-compatible /api/v1/hinai/d/{id}; its /d/{id} is a cascade
+        // resolver answering JSON with an upstream URL, which is not usable here.
+        mirrorDownloadPath: str("MIRROR_DOWNLOAD_PATH", "/api/v1/hinai/d/{id}"),
         mirrorUserAgent: str("MIRROR_USER_AGENT", "ordr-render/1.0 (+https://fishy.moe)"),
         videosDir: path.resolve(str("VIDEOS_DIR", path.join(cwd, "data", "videos"))),
         songsDir: path.resolve(str("SONGS_DIR", path.join(cwd, "data", "songs"))),

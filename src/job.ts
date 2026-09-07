@@ -109,7 +109,7 @@ type OszResult = { ok: true; path: string } | { ok: false; message: string }
 async function ensureOsz(cfg: Config, setId: number, log: (line: string) => void): Promise<OszResult> {
     const dest = path.join(cfg.songsDir, `${setId}.osz`)
     if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return { ok: true, path: dest }
-    const url = `${cfg.mirrorBase}/d/${setId}`
+    const url = `${cfg.mirrorBase}${cfg.mirrorDownloadPath.replace("{id}", String(setId))}`
     log(`fetching set ${setId} from the mirror`)
     let res: Response
     try {
