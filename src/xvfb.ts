@@ -27,6 +27,15 @@ export class Xvfb {
     }
 
     async start(): Promise<void> {
+        // /tmp may be a fresh empty volume (the k8s emptyDir): Xvfb needs the
+        // socket directory to exist, world-writable and sticky, and creating it
+        // ourselves as uid 1001 avoids depending on the X server's own mkdir.
+        try {
+            fs.mkdirSync("/tmp/.X11-unix", { recursive: true, mode: 0o1777 })
+            fs.chmodSync("/tmp/.X11-unix", 0o1777)
+        } catch (err) {
+            this.log(`Xvfb ${this.displayName}: could not prepare /tmp/.X11-unix: ${(err as Error).message}`)
+        }
         // A stale lock from a previous life of this display makes Xvfb exit at once.
         for (const p of [`/tmp/.X${this.display}-lock`, `/tmp/.X11-unix/X${this.display}`]) {
             fs.rmSync(p, { force: true })
