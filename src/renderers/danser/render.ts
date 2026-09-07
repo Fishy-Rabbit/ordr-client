@@ -1,175 +1,178 @@
-import { TDanserRenderJobData, TVideoRenderJobData } from "../../websocket_types"
+/*
+ * Adapted from the o!rdr client (MasterIO02/ordr-client, src/renderers/danser/render.ts)
+ * Copyright (c) 2025, issou.best and contributors. BSD-3-Clause; see LICENSE.
+ *
+ * Spawns danser-cli for one replay, turns its log into progress strings, maps
+ * the failure shapes it prints to error codes, and kills it when it stalls or
+ * overruns its time budget.
+ */
 import fs from "fs"
-import { emitJobError, emitJobProgress } from "../../websocket"
-import { ChildProcessByStdio, spawn } from "child_process"
-import Stream from "stream"
-import { config } from "../../util/config"
+import path from "path"
+import { spawn, ChildProcess } from "child_process"
 
-export type TDanserError = "BEATMAP_NOT_FOUND" | "BAD_OSU_OAUTH" | "PANIC" | "INVALID_DATA" | "NON_RENDER_ERROR" | "KILLED_STUCK" | "KILLED_UNKNOWN" | "KILLED_REQUESTED" | "INCOMPATIBLE_MODS"
-type TRenderResult = { success: true } | { success: false; error: TDanserError; exit?: boolean }
-type TDanserAbortReason = "STUCK" | "REQUESTED"
+export type DanserOutcome = { success: true; videoPath: string } | { success: false; errorCode: number; errorMessage: string }
 
-let danserProcess: ChildProcessByStdio<null, Stream.Readable, Stream.Readable>
-let abortReason: TDanserAbortReason | null = null
-
-export default async function renderDanserVideo(jobData: TVideoRenderJobData & TDanserRenderJobData): Promise<TRenderResult> {
-    let videoFilename = `render${jobData.renderID}`
-
-    let danserArguments = ["-replay", `${process.cwd()}/data/replays/${jobData.renderID}.osr`, "-out", videoFilename, "-noupdatecheck"]
-    if (jobData.skip) {
-        danserArguments.push("-skip")
-    }
-    if (jobData.addPitch) {
-        danserArguments.push("-pitch=1.5")
-    }
-
-    let canGetProgress = false
-    let isPanicking = false
-    let panicLogs = ""
-
-    // stuckCheckInterval is the interval that will check if the video file danser is currently generating is growing or not
-    let tempFilesPath = `bins/danser/videos/${videoFilename}_temp/`
-    let lastVideoSize = 0
-    let lastAudioSize = 0
-    let stuckCheckInterval = setInterval(() => {
-        if (!fs.existsSync(tempFilesPath + "video.mp4")) return
-
-        let videoSize = fs.existsSync(tempFilesPath + "video.mp4") ? fs.statSync(tempFilesPath + "video.mp4").size : lastVideoSize + 1
-        let audioSize = fs.existsSync(tempFilesPath + "audio.mp4") ? fs.statSync(tempFilesPath + "audio.mp4").size : lastAudioSize + 1
-
-        if (videoSize <= lastVideoSize && audioSize <= lastAudioSize) {
-            console.log("Seems like danser is stuck! Killing the process, waiting for a new job.")
-            abortDanserRender("STUCK")
-        } else {
-            lastVideoSize = videoSize
-            lastAudioSize = audioSize
-        }
-    }, 30000)
-
-    let renderResult = await new Promise<TRenderResult>(resolve => {
-        // stdio: [stdin, stdout, stderr], ignoring stdin to not passthrough CTRL+C and let the parent (the o!rdr client) handle it (in server.js)
-        // danser needs to be detached from the client for this to work, so this has no effect on Windows (see SIGINT catcher in server.js)
-        let danserExecutable = process.platform === "win32" ? "./danser-cli.exe" : "./danser-cli"
-        danserProcess = spawn(danserExecutable, danserArguments, { cwd: "bins/danser", stdio: ["ignore", "pipe", "pipe"], detached: process.platform === "win32" ? false : true })
-        danserProcess.stdout.setEncoding("utf8")
-        danserProcess.stdout.on("data", (data: string) => {
-            if (config.debug) console.debug(data)
-
-            // we can start processing the "Progress" logs from danser once we see the "Starting encoding", else we may catch the Progess logs from pp processing
-            if (data.includes("Starting encoding")) canGetProgress = true
-
-            if (data.includes("Progress") && canGetProgress) {
-                const match = data.match(/(\d+)%/)
-                if (match) emitJobProgress(Number(match[1]))
-                if (!config.debug) console.log(data.replaceAll("\n", ""))
-            }
-
-            // render is finished, we have nothing more to do with danser, can resolve this promise
-            if (data.includes("Finished.")) {
-                console.log(`Rendering done.`)
-                resolve({ success: true })
-            }
-
-            if (data.includes("Beatmap not found")) {
-                console.log("Cannot process replay because the local map is older (or newer?) than the map used by the replay. This is not a problem, waiting for a new job.")
-                resolve({ success: false, error: "BEATMAP_NOT_FOUND" })
-            }
-
-            if (data.includes("Error connecting to osu!api") && data.includes("invalid_client")) {
-                abortDanserRender()
-                console.log("It looks like your osu! OAuth keys are invalid! Please fix them before running the client.")
-                resolve({ success: false, error: "BAD_OSU_OAUTH", exit: true })
-            }
-
-            let logIsPanic = data.split(" ")[2] === "panic:"
-            // we have specific panics that we want to handle, checking for them and returning before the unhandled panic check
-            if (logIsPanic) {
-                if (data.includes("Video codec") && data.includes("does not exist")) {
-                    console.log('It looks like the wrong encoder was selected. Please change it in the client configuration (can be "cpu", "nvenc", or "qsv").')
-                    resolve({ success: false, error: "NON_RENDER_ERROR", exit: true })
-                    return
-                } else if (data.includes("Incompatible mods")) {
-                    console.log("danser reports that the replay has incompatible mods selected. This could be the result of a tampered replay or a mod combination that isn't supported by danser yet.")
-                    resolve({ success: false, error: "INCOMPATIBLE_MODS" })
-                    return
-                } else if (data.includes("operation not permitted")) {
-                    console.log("A weird error occured. It's most likely the result of something wrong on your system: some other app interfering or just bad configuration. Please restart the client when you're sure everything is OK.")
-                    resolve({ success: false, error: "NON_RENDER_ERROR", exit: true })
-                    return
-                }
-            }
-
-            // we have an unhandled danser panic or a Go fatal error, since danser always exits after these and we need to get its logs we're resolving the promise in the process exit event
-            // we can just check if line starts with "fatal error:" as unlike the panic, there is no date before this string
-            if (logIsPanic || data.startsWith("fatal error:")) isPanicking = true
-            if (isPanicking) panicLogs += data // if danser has shown it's panicking/fatal erroring, we're collecting new logs to have the full error
-        })
-        danserProcess.stderr.setEncoding("utf8")
-        danserProcess.stderr.on("data", (data: string) => {
-            if (data.includes("Invalid data found") || data.includes("strconv.ParseFloat")) {
-                resolve({ success: false, error: "INVALID_DATA" })
-                console.log("Found invalid data in the replay, it may be corrupted. Waiting for a new job.")
-            }
-
-            if (
-                data.includes("Error initializing an internal MFX session: unsupported") || // when the intel encoder is set on a computer that doesn't support it
-                data.includes("Cannot load libcuda.so") // when the nvidia encoder is set on a computer that doesn't support it
-            ) {
-                console.log('It looks like the wrong encoder was selected. Please change it in the client configuration (can be "cpu", "nvenc", or "qsv").')
-                resolve({ success: false, error: "NON_RENDER_ERROR", exit: true })
-            }
-
-            if (data.includes("CUDA_ERROR_OUT_OF_MEMORY") || data.includes("failed: out of memory")) {
-                console.log("Your GPU is out of VRAM! Are you gaming? Please open the client once you have a few free GBs of VRAM.")
-                resolve({ success: false, error: "NON_RENDER_ERROR", exit: true })
-            }
-
-            // not sure if "fatal error" is in stdout or stderr so we handle it in both
-            if (data.startsWith("fatal error:")) isPanicking = true
-            if (isPanicking) panicLogs += data
-
-            if (config.debug) {
-                console.debug(data)
-            } else if (data.includes("bitrate") && data.includes("frame") && !data.includes("version")) {
-                console.log(data.replaceAll("\n", ""))
-            }
-        })
-        danserProcess.on("exit", (code, signal) => {
-            if (isPanicking) {
-                console.log("An error occured. Waiting for a new job, though you might want to check what happened in the crash report. This error has been automatically reported to o!rdr.")
-                emitJobError({ source: "DANSER_PANIC", panic: panicLogs })
-                // danser always exits on panic so we can resolve here
-                resolve({ success: false, error: "PANIC" })
-            }
-
-            if (signal === "SIGKILL") {
-                if (abortReason) {
-                    // danser was killed via abortRender
-                    resolve({ success: false, error: `KILLED_${abortReason}` })
-                } else {
-                    resolve({ success: false, error: "KILLED_UNKNOWN" })
-                }
-                abortReason = null
-            }
-        })
-    })
-
-    // clearing the stuck check interval
-    clearInterval(stuckCheckInterval)
-
-    return renderResult
+export type DanserRunArgs = {
+    danserDir: string
+    replayPath: string
+    outName: string
+    settingsName: string
+    outputDir: string
+    env: NodeJS.ProcessEnv
+    timeoutMs: number
+    stallMs: number
+    debug: boolean
+    onProgress: (progress: string) => void
+    log: (line: string) => void
 }
 
-/**
- * @description Kill danser.
- * @param reason If specified, will set the global variable "abortReason" to this to be able to resolve the danser promise with it as the error
- */
-export function abortDanserRender(reason?: TDanserAbortReason) {
-    if (reason) abortReason = reason
-    let killed = danserProcess.kill("SIGKILL")
-    if (killed) {
-        console.log("danser killed successfully. You may see FFmpeg errors but they should be harmless.")
-    } else {
-        console.log("danser not killed, not sure why. Maybe it already wasn't running?")
+const TAIL_LINES = 40
+
+export class DanserRun {
+    private proc: ChildProcess | null = null
+    private abortCode: number | null = null
+    private abortMessage = ""
+
+    constructor(private readonly args: DanserRunArgs) {}
+
+    /** Kill danser; the first reason given is the one reported. */
+    abort(errorCode: number, message: string): void {
+        if (this.abortCode === null) {
+            this.abortCode = errorCode
+            this.abortMessage = message
+        }
+        this.proc?.kill("SIGKILL")
+    }
+
+    run(): Promise<DanserOutcome> {
+        const a = this.args
+        const videoPath = path.join(a.outputDir, `${a.outName}.mp4`)
+        const tempDirs = [path.join(a.danserDir, "videos", `${a.outName}_temp`), path.join(a.outputDir, `${a.outName}_temp`)]
+        const tail: string[] = []
+        const remember = (line: string) => {
+            tail.push(line)
+            if (tail.length > TAIL_LINES) tail.shift()
+        }
+        const tailText = () => tail.join("\n").slice(-1500)
+
+        let canGetProgress = false
+        let finished = false
+        let panicking = false
+        let errorCode: number | null = null
+        let errorMessage = ""
+        const fail = (code: number, message: string) => {
+            if (errorCode === null) {
+                errorCode = code
+                errorMessage = message
+            }
+        }
+
+        return new Promise<DanserOutcome>(resolve => {
+            const danserArguments = ["-replay", a.replayPath, "-out", a.outName, "-noupdatecheck", "-skip", `-settings=${a.settingsName}`]
+            const proc = spawn("./danser-cli", danserArguments, { cwd: a.danserDir, env: a.env, stdio: ["ignore", "pipe", "pipe"] })
+            this.proc = proc
+
+            const timeout = setTimeout(() => this.abort(21, `render exceeded the ${Math.round(a.timeoutMs / 60000)} minute limit`), a.timeoutMs)
+
+            // Stall detector: once danser has begun writing its temp video/audio,
+            // two consecutive checks without growth means it is wedged.
+            let lastSize = -1
+            let stillChecks = 0
+            const stall = setInterval(() => {
+                let size = 0
+                let seen = false
+                for (const dir of tempDirs) {
+                    for (const f of ["video.mp4", "audio.mp4"]) {
+                        const p = path.join(dir, f)
+                        if (fs.existsSync(p)) {
+                            seen = true
+                            size += fs.statSync(p).size
+                        }
+                    }
+                }
+                if (!seen) return
+                if (size <= lastSize) {
+                    stillChecks++
+                    if (stillChecks >= 2) this.abort(21, `danser stalled: no output growth for ${Math.round((2 * a.stallMs) / 2000)}s`)
+                } else {
+                    stillChecks = 0
+                    lastSize = size
+                }
+            }, a.stallMs / 2)
+
+            const onLine = (line: string, stream: "stdout" | "stderr") => {
+                if (!line.trim()) return
+                remember(line)
+                if (a.debug) a.log(`[danser ${stream}] ${line}`)
+
+                if (stream === "stdout") {
+                    // Progress lines before "Starting encoding" belong to the pp pre-pass.
+                    if (line.includes("Starting encoding")) canGetProgress = true
+                    if (canGetProgress && line.includes("Progress")) {
+                        const match = line.match(/(\d+)%/)
+                        if (match) {
+                            const pct = Number(match[1])
+                            a.onProgress(pct >= 100 ? "Finalizing" : `Rendering (${pct}%)`)
+                        }
+                    }
+                    if (line.includes("Finished.")) {
+                        finished = true
+                        a.onProgress("Finalizing")
+                    }
+                    if (line.includes("Beatmap not found")) {
+                        fail(8, "danser could not match the replay to a difficulty in the downloaded set (the map may have been updated since the play)")
+                    }
+                }
+                if (line.includes("Invalid data found") || line.includes("strconv.ParseFloat")) {
+                    fail(5, "danser found invalid data in the replay; it may be corrupted")
+                }
+                // danser prefixes its log with a date and time, so a panic reads
+                // "2025/01/01 00:00:00 panic: ..."; a Go runtime fatal has no prefix.
+                const isPanic = /^\S+ \S+ panic:/.test(line) || line.startsWith("panic:")
+                if (isPanic && line.includes("Incompatible mods")) {
+                    fail(26, "danser reports an incompatible mod combination")
+                }
+                if (isPanic || line.startsWith("fatal error:")) panicking = true
+            }
+            const attach = (stream: NodeJS.ReadableStream | null, name: "stdout" | "stderr") => {
+                if (!stream) return
+                let buffer = ""
+                stream.setEncoding("utf8")
+                stream.on("data", (chunk: string) => {
+                    buffer += chunk
+                    const lines = buffer.split(/\r?\n/)
+                    buffer = lines.pop() ?? ""
+                    for (const line of lines) onLine(line, name)
+                })
+                stream.on("end", () => {
+                    if (buffer) onLine(buffer, name)
+                })
+            }
+            attach(proc.stdout, "stdout")
+            attach(proc.stderr, "stderr")
+
+            proc.on("error", err => {
+                fail(21, `could not start danser: ${err.message}`)
+            })
+            proc.on("exit", (code, signal) => {
+                clearTimeout(timeout)
+                clearInterval(stall)
+                this.proc = null
+                if (finished && fs.existsSync(videoPath)) {
+                    resolve({ success: true, videoPath })
+                    return
+                }
+                if (this.abortCode !== null) {
+                    resolve({ success: false, errorCode: this.abortCode, errorMessage: `${this.abortMessage}\n${tailText()}`.trim() })
+                    return
+                }
+                if (errorCode !== null) {
+                    resolve({ success: false, errorCode, errorMessage: `${errorMessage}\n${tailText()}`.trim() })
+                    return
+                }
+                const why = panicking ? "danser panicked" : finished ? "danser finished but wrote no video" : `danser exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
+                resolve({ success: false, errorCode: 21, errorMessage: `${why}\n${tailText()}`.trim() })
+            })
+        })
     }
 }

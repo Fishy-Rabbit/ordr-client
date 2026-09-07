@@ -1,306 +1,161 @@
-import { TStartupData } from "../../util/startup_data"
-import validateFiles from "../../util/validate_files"
-import updateDanser from "./update"
+/*
+ * Adapted from the o!rdr client (MasterIO02/ordr-client, src/renderers/danser/prepare.ts)
+ * Copyright (c) 2025, issou.best and contributors. BSD-3-Clause; see LICENSE.
+ *
+ * The 55-option job mapping of the original is reduced to the eight options
+ * this worker's clients send; every other danser knob keeps the value o!rdr
+ * used for its default renders, so the output looks like an o!rdr video.
+ */
 import fs from "fs"
-import { spawn } from "child_process"
-import { config } from "../../util/config"
-import { TDanserRenderJobData, TVideoRenderJobData } from "../../websocket_types"
-import { getKeys } from "../../util/keys"
-import cleanExit from "../../util/clean_exit"
-import si from "systeminformation"
-import downloadFile from "../../util/download_file"
-import extractFile from "../../util/extract_file"
+import path from "path"
+import { Preset } from "../../config"
 
-/**
- * @description Prepare danser to be used with the client (check version, download binaries...), ran once on client startup
- */
-export async function prepareDanserStartup(startupData: TStartupData) {
-    if (!fs.existsSync("bins/danser")) fs.mkdirSync("bins/danser")
+export type RenderOptions = {
+    showPPCounter: boolean
+    showHitErrorMeter: boolean
+    showResultScreen: boolean
+    showDanserLogo: boolean
+    loadVideo: boolean
+    loadStoryboard: boolean
+    inGameBGDim: number
+    cursorSize: number
+}
 
-    let validatedFiles = await validateFiles(startupData.validateFiles, "danser")
+export const DEFAULT_OPTIONS: RenderOptions = {
+    showPPCounter: true,
+    showHitErrorMeter: true,
+    showResultScreen: true,
+    showDanserLogo: true,
+    loadVideo: true,
+    loadStoryboard: true,
+    inGameBGDim: 75,
+    cursorSize: 1
+}
 
-    if (!validatedFiles) {
-        console.log("The version of danser is too old or corrupted, updating now")
-        await updateDanser(startupData.danserVersion)
+export type Json = Record<string, unknown>
+
+function set(root: Json, dotted: string, value: unknown): void {
+    const parts = dotted.split(".")
+    let node: Json = root
+    for (let i = 0; i < parts.length - 1; i++) {
+        const next = node[parts[i]]
+        if (typeof next !== "object" || next === null || Array.isArray(next)) {
+            node[parts[i]] = {}
+        }
+        node = node[parts[i]] as Json
     }
+    node[parts[parts.length - 1]] = value
+}
 
-    // downloading the default fallback skin for danser
-    if (!fs.existsSync("data/skins/default_fallback")) {
-        await downloadFile({ url: "https://dl.issou.best/ordr/default_fallback_skin.zip", to: "data/skins", filename: "default_fallback_skin.zip" })
-        await extractFile({ input: "data/skins/default_fallback_skin.zip", output: "data/skins/default_fallback" })
-    }
-
-    // run danser dry once to make sure it can open
-    await danserDryRun()
+export type SettingsArgs = {
+    songsDir: string
+    skinsDir: string
+    outputDir: string
+    preset: Preset
+    options: RenderOptions
+    skin: string
 }
 
 /**
- * @description Prepare danser render settings for an incoming render
- * @param jobData If supplied, the settings we have to set for the render. Else, danser's settings will be default, with the client's paths and selected encoder
- * @param skinFolderName If supplied and not null, the (custom) skin folder name we should use for the render
+ * Build the per-render danser settings document. `base` is the defaults file
+ * danser itself generated at boot (or `{}`: danser fills any key we leave out
+ * with its own default when it loads the file).
  */
-export async function prepareDanserRender(jobData?: TVideoRenderJobData & TDanserRenderJobData, skinFolderName?: string | null) {
-    // not try/catching anything here as all errors should make the client exit, everything will be catched by the global process exceptions listener
+export function buildDanserSettings(base: Json, args: SettingsArgs): Json {
+    const s = structuredClone(base)
+    const { preset, options: o } = args
 
-    // delete the current danser config
-    if (fs.existsSync("bins/danser/settings/default.json")) {
-        fs.rmSync("bins/danser/settings/default.json")
-    }
+    set(s, "General.OsuSongsDir", args.songsDir)
+    set(s, "General.OsuSkinsDir", args.skinsDir)
+    set(s, "Recording.OutputDir", args.outputDir)
 
-    // run danser once to generate a new empty config
-    await danserDryRun()
+    set(s, "Recording.FrameWidth", preset.width)
+    set(s, "Recording.FrameHeight", preset.height)
+    set(s, "Recording.FPS", preset.fps)
+    set(s, "Recording.Filters", "")
+    set(s, "Recording.MotionBlur.Enabled", false)
 
-    let danserConfig = JSON.parse(fs.readFileSync("bins/danser/settings/default.json", { encoding: "utf-8" }))
-    danserConfig.General.OsuSongsDir = process.cwd() + "/data/songs"
-    danserConfig.General.OsuSkinsDir = process.cwd() + "/data/skins"
-    danserConfig.Recording.OutputDir = process.cwd() + "/data/videos"
+    // CPU encoder only: the same libx264 profile o!rdr's "cpu" renderers use.
+    set(s, "Recording.Encoder", "libx264")
+    set(s, "Recording.libx264.CRF", preset.turbo ? 51 : 21)
+    set(s, "Recording.libx264.Preset", preset.turbo ? "ultrafast" : "faster")
+    set(s, "Recording.libx264.AdditionalOptions", "-g 450")
+    set(s, "Recording.AudioCodec", "aac")
+    set(s, "Recording.aac.Bitrate", preset.turbo ? "24k" : "160k")
 
-    switch (config.encoder) {
-        case "cpu":
-            danserConfig.Recording.Encoder = "libx264"
-            if (jobData?.turboMode) {
-                danserConfig.Recording.libx264.CRF = 51
-                danserConfig.Recording.libx264.Preset = "ultrafast"
-                danserConfig.Recording.libx264.AdditionalOptions = "-g 450"
-            } else {
-                danserConfig.Recording.libx264.CRF = 21
-                danserConfig.Recording.libx264.Preset = "faster"
-                danserConfig.Recording.libx264.AdditionalOptions = "-g 450"
-            }
-            break
-        case "nvenc":
-            danserConfig.Recording.Encoder = "h264_nvenc"
-            if (jobData?.turboMode) {
-                danserConfig.Recording.h264_nvenc.RateControl = "cqp"
-                danserConfig.Recording.h264_nvenc.CQ = 51
-                danserConfig.Recording.h264_nvenc.Preset = "p1"
-                danserConfig.Recording.h264_nvenc.AdditionalOptions = "-g 450"
-            } else {
-                danserConfig.Recording.h264_nvenc.RateControl = "cqp"
-                danserConfig.Recording.h264_nvenc.CQ = 26
-                danserConfig.Recording.h264_nvenc.Preset = "p7"
-                danserConfig.Recording.h264_nvenc.AdditionalOptions = "-g 450"
-            }
-            break
-        case "qsv":
-            danserConfig.Recording.Encoder = "h264_qsv"
-            if (jobData?.turboMode) {
-                danserConfig.Recording.h264_qsv.ICQ = 51
-                danserConfig.Recording.h264_qsv.Preset = "veryfast"
-                danserConfig.Recording.h264_qsv.AdditionalOptions = "-g 450"
-            } else {
-                // -global_quality was 31 before and looked okay-ish on 1080p but very bad on 720p
-                if (jobData?.resolution === "1920x1080" || jobData?.resolution === "3840x2160") {
-                    danserConfig.Recording.h264_qsv.Quality = 28
-                    danserConfig.Recording.h264_qsv.AdditionalOptions = "-g 450"
-                } else {
-                    danserConfig.Recording.h264_qsv.Quality = 25
-                    danserConfig.Recording.h264_qsv.AdditionalOptions = "-g 450"
-                }
-                danserConfig.Recording.h264_qsv.Preset = "veryslow"
-            }
-            break
-    }
+    // o!rdr's default mix: 50% master, music and hitsounds.
+    set(s, "Audio.GeneralVolume", 0.5)
+    set(s, "Audio.MusicVolume", 0.5)
+    set(s, "Audio.SampleVolume", 0.5)
+    set(s, "Audio.IgnoreBeatmapSamples", false)
+    set(s, "Audio.PlayNightcoreSamples", true)
+    set(s, "Audio.OnlineOffset", false)
 
-    if (jobData) {
-        // write danser's credentials file with the osu! oauth api keys
-        let keys = await getKeys()
-        if (!keys) {
-            // should never happen
-            console.error("No keys?!")
-            await cleanExit()
-            return
-        }
-        if (keys.osu.oauth_client_id && keys.osu.oauth_client_secret) {
-            const danserCredentials = JSON.parse(fs.readFileSync("bins/danser/settings/credentials.json", { encoding: "utf-8" }))
-            if (danserCredentials.ClientId !== keys.osu.oauth_client_id || danserCredentials.ClientSecret !== keys.osu.oauth_client_secret) {
-                danserCredentials.ClientId = keys.osu.oauth_client_id
-                danserCredentials.ClientSecret = keys.osu.oauth_client_secret
-                fs.writeFileSync("bins/danser/settings/credentials.json", JSON.stringify(danserCredentials, null, 1), { encoding: "utf-8" })
-            }
-        }
+    set(s, "Gameplay.IgnoreFailsInReplays", false)
+    set(s, "Gameplay.HitErrorMeter.Show", o.showHitErrorMeter)
+    set(s, "Gameplay.HitErrorMeter.ShowUnstableRate", true)
+    set(s, "Gameplay.Score.Show", true)
+    set(s, "Gameplay.HpBar.Show", true)
+    set(s, "Gameplay.ComboCounter.Show", true)
+    set(s, "Gameplay.KeyOverlay.Show", true)
+    // No scoreboard: it would need the osu! API, which this worker never talks to.
+    set(s, "Gameplay.ScoreBoard.Show", false)
+    set(s, "Gameplay.ScoreBoard.HideOthers", true)
+    set(s, "Gameplay.ScoreBoard.ShowAvatars", false)
+    set(s, "Gameplay.PPCounter.Show", o.showPPCounter)
+    set(s, "Gameplay.PPCounter.Align", "TopLeft")
+    set(s, "Gameplay.HitCounter.Show", false)
+    set(s, "Gameplay.HitCounter.ShowSliderBreaks", false)
+    set(s, "Gameplay.AimErrorMeter.Show", false)
+    set(s, "Gameplay.StrainGraph.Show", false)
+    set(s, "Gameplay.Boundaries.Enabled", true)
+    set(s, "Gameplay.Mods.Show", true)
+    set(s, "Gameplay.ShowResultsScreen", o.showResultScreen)
 
-        if (jobData.resolution === "3840x2160") {
-            danserConfig.Recording.Filters = "scale=3840:2160:flags=lanczos"
-        } else {
-            danserConfig.Recording.Filters = ""
-        }
+    set(s, "Skin.CurrentSkin", args.skin)
+    set(s, "Skin.FallbackSkin", "default")
+    set(s, "Skin.UseBeatmapColors", true)
+    set(s, "Skin.UseColorsFromSkin", true)
+    set(s, "Skin.Cursor.UseSkinCursor", true)
+    set(s, "Skin.Cursor.Scale", o.cursorSize)
+    set(s, "Skin.Cursor.ForceLongTrail", false)
+    set(s, "Skin.Cursor.LongTrailDensity", 1)
+    set(s, "Skin.Cursor.LongTrailLength", 2048)
 
-        let resolution = jobData.resolution.split(" ")[0].split("x")
-        let width = Number(resolution[0])
-        let height = Number(resolution[1])
-        danserConfig.Recording.FrameWidth = width !== 3840 ? width : 1920
-        danserConfig.Recording.FrameHeight = height !== 2160 ? height : 1080
+    set(s, "Cursor.ScaleToCS", false)
+    set(s, "Cursor.Colors.EnableRainbow", false)
+    set(s, "Cursor.EnableTrailGlow", true)
+    set(s, "Cursor.CursorRipples", false)
 
-        if (jobData.turboMode) {
-            danserConfig.Recording.FPS = 15
-        } else if (jobData.resolution == "640x480") {
-            danserConfig.Recording.FPS = 30
-        } else {
-            danserConfig.Recording.FPS = 60
-        }
+    set(s, "Objects.DrawFollowPoints", true)
+    set(s, "Objects.DrawComboNumbers", true)
+    set(s, "Objects.ScaleToTheBeat", false)
+    set(s, "Objects.Sliders.SliderMerge", false)
+    set(s, "Objects.Sliders.Snaking.In", true)
+    set(s, "Objects.Sliders.Snaking.Out", true)
+    set(s, "Objects.Colors.Sliders.Border.Color.FlashToTheBeat", false)
+    set(s, "Objects.Colors.Sliders.Body.Color.FlashToTheBeat", false)
+    set(s, "Objects.Colors.Sliders.Body.UseHitCircleColor", true)
 
-        danserConfig.Audio.GeneralVolume = jobData.globalVolume === 100 ? 1 : Number("0." + jobData.globalVolume)
-        danserConfig.Audio.MusicVolume = jobData.musicVolume === 100 ? 1 : Number("0." + jobData.musicVolume)
-        danserConfig.Audio.SampleVolume = jobData.hitsoundVolume === 100 ? 1 : Number("0." + jobData.hitsoundVolume)
+    set(s, "Playfield.Background.FlashToTheBeat", false)
+    set(s, "Playfield.SeizureWarning.Enabled", false)
+    set(s, "Playfield.Background.LoadStoryboards", o.loadStoryboard)
+    set(s, "Playfield.Background.LoadVideos", o.loadVideo)
+    set(s, "Playfield.Background.Dim.Intro", 0)
+    set(s, "Playfield.Background.Dim.Normal", Math.min(100, Math.max(0, o.inGameBGDim)) / 100)
+    set(s, "Playfield.Background.Dim.Breaks", 0.3)
+    set(s, "Playfield.Background.Parallax.Amount", 0)
+    set(s, "Playfield.Logo.Dim.Intro", o.showDanserLogo ? 0 : 1)
+    set(s, "Playfield.OsuShift", true)
 
-        danserConfig.Audio.IgnoreBeatmapSamples = jobData.useSkinHitsounds
-        danserConfig.Audio.PlayNightcoreSamples = jobData.playNightcoreSamples
-
-        danserConfig.Audio.OnlineOffset = jobData.hasOnlineOffset
-
-        danserConfig.Gameplay.IgnoreFailsInReplays = jobData.ignoreFail ?? false
-
-        danserConfig.Gameplay.HitErrorMeter.Show = jobData.showHitErrorMeter
-        danserConfig.Gameplay.HitErrorMeter.ShowUnstableRate = jobData.showUnstableRate
-        danserConfig.Gameplay.Score.Show = jobData.showScore
-        danserConfig.Gameplay.HpBar.Show = jobData.showHPBar
-        danserConfig.Gameplay.ComboCounter.Show = jobData.showComboCounter
-        danserConfig.Gameplay.KeyOverlay.Show = jobData.showKeyOverlay
-        danserConfig.Gameplay.ScoreBoard.Show = jobData.showScoreboard
-
-        danserConfig.Gameplay.PPCounter.Show = jobData.showPPCounter
-        danserConfig.Gameplay.HitCounter.Show = jobData.showHitCounter
-        danserConfig.Gameplay.HitCounter.ShowSliderBreaks = jobData.showSliderBreaks ?? false
-        danserConfig.Gameplay.AimErrorMeter.Show = jobData.showAimErrorMeter
-        danserConfig.Gameplay.StrainGraph.Show = jobData.showStrainGraph ?? false
-
-        danserConfig.Gameplay.PPCounter.Align = "TopLeft"
-        danserConfig.Gameplay.PPCounter.XPosition = jobData.elementsPosition.ppCounter.x
-        danserConfig.Gameplay.PPCounter.YPosition = jobData.elementsPosition.ppCounter.y
-        danserConfig.Gameplay.HitCounter.Align = "TopLeft"
-        danserConfig.Gameplay.HitCounter.ValueAlign = "TopLeft"
-        danserConfig.Gameplay.HitCounter.XPosition = jobData.elementsPosition.hitCounter.x
-        danserConfig.Gameplay.HitCounter.YPosition = jobData.elementsPosition.hitCounter.y
-        danserConfig.Gameplay.AimErrorMeter.Align = "TopLeft"
-        danserConfig.Gameplay.AimErrorMeter.XPosition = jobData.elementsPosition.aimErrorMeter.x
-        danserConfig.Gameplay.AimErrorMeter.YPosition = jobData.elementsPosition.aimErrorMeter.y
-        danserConfig.Gameplay.StrainGraph.Align = "TopLeft"
-        danserConfig.Gameplay.StrainGraph.XPosition = jobData.elementsPosition.strainGraph.x
-        danserConfig.Gameplay.StrainGraph.YPosition = jobData.elementsPosition.strainGraph.y
-
-        if (jobData.showScoreboard) {
-            danserConfig.Gameplay.ScoreBoard.HideOthers = false
-            danserConfig.Gameplay.ScoreBoard.ShowAvatars = jobData.showAvatarsOnScoreboard
-        } else {
-            danserConfig.Gameplay.ScoreBoard.HideOthers = true
-            danserConfig.Gameplay.ScoreBoard.ShowAvatars = false
-        }
-
-        danserConfig.Gameplay.Boundaries.Enabled = jobData.showBorders
-        danserConfig.Gameplay.Mods.Show = jobData.showMods
-        danserConfig.Gameplay.ShowResultsScreen = jobData.showResultScreen
-
-        let skin = "default" // default fallback skin is "default"
-        if (jobData.skin !== 0 && skinFolderName) {
-            skin = skinFolderName
-        } else if (jobData.skin !== 0) {
-            console.log("The render has a custom skin set, but its folder name wasn't supplied! This shouldn't happen, using default skin as fallback.")
-        } // else, the default skin is selected
-        danserConfig.Skin.CurrentSkin = skin
-
-        danserConfig.Skin.Cursor.UseSkinCursor = jobData.useSkinCursor
-        danserConfig.Skin.FallbackSkin = "default_fallback"
-
-        if (jobData.useSkinColors) {
-            danserConfig.Skin.UseBeatmapColors = false
-            danserConfig.Skin.UseColorsFromSkin = true
-        }
-
-        if (jobData.useBeatmapColors) {
-            danserConfig.Skin.UseBeatmapColors = true
-            danserConfig.Skin.UseColorsFromSkin = true
-        }
-
-        danserConfig.Cursor.ScaleToCS = jobData.cursorScaleToCS
-        danserConfig.Cursor.Colors.EnableRainbow = jobData.cursorRainbow
-        danserConfig.Cursor.EnableTrailGlow = jobData.cursorTrailGlow
-        danserConfig.Skin.Cursor.Scale = jobData.cursorSize
-
-        if (jobData.cursorTrail) {
-            danserConfig.Skin.Cursor.ForceLongTrail = false
-            danserConfig.Skin.Cursor.LongTrailDensity = 1
-            danserConfig.Skin.Cursor.LongTrailLength = 2048
-        } else {
-            danserConfig.Skin.Cursor.ForceLongTrail = true
-            danserConfig.Skin.Cursor.LongTrailDensity = 0
-            danserConfig.Skin.Cursor.LongTrailLength = 0
-        }
-
-        danserConfig.Objects.DrawFollowPoints = jobData.drawFollowPoints
-        danserConfig.Objects.DrawComboNumbers = jobData.drawComboNumbers
-
-        danserConfig.Objects.ScaleToTheBeat = jobData.scaleToTheBeat
-        danserConfig.Objects.Sliders.SliderMerge = jobData.sliderMerge
-
-        if (jobData.objectsRainbow) {
-            danserConfig.Skin.UseBeatmapColors = false
-            danserConfig.Skin.UseColorsFromSkin = false
-            danserConfig.Objects.Colors.Color.EnableRainbow = true
-        }
-
-        danserConfig.Objects.Colors.Sliders.Border.Color.FlashToTheBeat = jobData.objectsFlashToTheBeat
-        danserConfig.Objects.Colors.Sliders.Body.Color.FlashToTheBeat = jobData.objectsFlashToTheBeat
-        danserConfig.Playfield.Background.FlashToTheBeat = jobData.objectsFlashToTheBeat
-
-        danserConfig.Objects.Colors.Sliders.Body.UseHitCircleColor = jobData.useHitCircleColor
-
-        danserConfig.Playfield.SeizureWarning.Enabled = jobData.seizureWarning
-        danserConfig.Playfield.Background.LoadStoryboards = jobData.loadStoryboard
-        danserConfig.Playfield.Background.LoadVideos = jobData.loadVideo
-
-        danserConfig.Playfield.Background.Dim.Intro = jobData.introBGDim === 100 ? 1 : Number("0." + jobData.introBGDim)
-        danserConfig.Playfield.Background.Dim.Normal = jobData.inGameBGDim === 100 ? 1 : Number("0." + jobData.inGameBGDim)
-        danserConfig.Playfield.Background.Dim.Breaks = jobData.breakBGDim === 100 ? 1 : Number("0." + jobData.breakBGDim)
-
-        danserConfig.Playfield.Background.Parallax.Amount = jobData.BGParallax ? 0.1 : 0
-
-        danserConfig.Playfield.Logo.Dim.Intro = jobData.showDanserLogo ? 0 : 1
-
-        danserConfig.Playfield.OsuShift = true
-
-        danserConfig.Cursor.CursorRipples = jobData.cursorRipples
-        danserConfig.Objects.Sliders.Snaking.In = jobData.sliderSnakingIn
-        danserConfig.Objects.Sliders.Snaking.Out = jobData.sliderSnakingOut
-
-        if (jobData.motionBlur960fps) {
-            danserConfig.Recording.MotionBlur.Enabled = true
-            danserConfig.Recording.MotionBlur.OversampleMultiplier = Number(((jobData.motionBlurForce * 16) / 960).toFixed(0))
-            danserConfig.Recording.MotionBlur.BlendFrames = Number(((jobData.motionBlurForce * 22) / 960).toFixed(0))
-        } else {
-            danserConfig.Recording.MotionBlur.Enabled = false
-        }
-
-        danserConfig.Recording.AudioCodec = "aac"
-        danserConfig.Recording.aac.Bitrate = jobData.turboMode ? "24k" : "160k"
-    } else {
-        danserConfig.Gameplay.ScoreBoard.Show = false // no need for scoreboard in benchmark or default settings
-    }
-
-    // write config
-    fs.writeFileSync("bins/danser/settings/default.json", JSON.stringify(danserConfig, null, 1), { encoding: "utf-8" })
+    return s
 }
 
-/**
- * @description Run danser "dry" to test for errors on startup, and generate empty config files (settings, credentials) when they're not present
- */
-async function danserDryRun() {
-    await new Promise(async resolve => {
-        let gpuData = await si.graphics()
-        if (gpuData.displays.length == 0) {
-            console.error("It appears that you do not have a display connected. This is a requirement to run the o!rdr client. Please connect a display and try again.")
-            await cleanExit()
-            return
-        }
-        // the empty settings argument is used to not trigger the rickroll
-        let danserProcess = spawn("./danser-cli", ["-settings=", "-noupdatecheck"], { cwd: "bins/danser" })
-        danserProcess.addListener("exit", () => {
-            resolve(true)
-        })
-        // should we handle anything else here? can danser panic when ran empty?
-        danserProcess.on("error", err => {
-            console.error("An error occured while trying to test run danser", err)
-            process.exit(1)
-        })
-    })
+/** Write `settings/<name>.json` inside a slot's private danser directory. */
+export function writeSlotSettings(danserDir: string, name: string, settings: Json): string {
+    const dir = path.join(danserDir, "settings")
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, `${name}.json`)
+    fs.writeFileSync(file, JSON.stringify(settings, null, 1), "utf-8")
+    return file
 }
