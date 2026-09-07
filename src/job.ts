@@ -25,6 +25,9 @@ export function slotEnv(cfg: Config, slot: SlotPaths): NodeJS.ProcessEnv {
         LIBGL_ALWAYS_SOFTWARE: "1",
         GALLIUM_DRIVER: "llvmpipe",
         LP_NUM_THREADS: String(cfg.threadsPerSlot),
+        // danser execs its bundled ffmpeg/ffmpeg as a child process, and that
+        // binary finds its sibling libav*.so only through the loader path.
+        LD_LIBRARY_PATH: [path.join(slot.danserDir, "ffmpeg"), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
         HOME: slot.root
     }
 }
