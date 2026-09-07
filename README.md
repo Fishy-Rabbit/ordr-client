@@ -1,58 +1,78 @@
-# o!rdr client
+# ordr-render
 
-The client used to render videos at https://ordr.issou.best.
+A self-hosted osu! replay render worker. It takes a replay over HTTP, renders it
+with [danser](https://github.com/Wieku/danser-go) under a virtual X display
+(Xvfb + Mesa llvmpipe, pure CPU), and serves the MP4 back. The API is the subset
+of the public o!rdr API a render panel needs, so a client written for o!rdr can
+point at this worker instead, but this worker never talks to o!rdr, osu! or any
+other host: the only outbound request it makes is the beatmap download from the
+mirror you configure.
 
-Modifying the source code to use with the official o!rdr server will lead to a ban.
+## Notice
 
-## What does this do?
+This is a fork of [MasterIO02/ordr-client](https://github.com/MasterIO02/ordr-client)
+(BSD-3-Clause, Copyright (c) 2025 issou.best and contributors; see `LICENSE`).
+The danser settings mapping (`src/renderers/danser/prepare.ts`) and the danser
+process driver (`src/renderers/danser/render.ts`) are adapted from it. The
+websocket client, updater, telemetry, prompts and the ORV renderer were removed;
+the worker is not usable with, and must not be pointed at, the official o!rdr
+server.
 
-o!rdr is a free and easy-to-use API/website that allows you to render osu! videos of replays using danser (https://github.com/Wieku/danser-go).
+danser-go is GPL-3.0 and runs as a separate process. The Docker image downloads
+the pinned release zip once at build time (sha256-checked) and never downloads
+anything at runtime. The zip ships danser's built-in default skin only; drop any
+extra skin folders (an `.osk` is a zip) into `SKINS_DIR` yourself.
 
-This is the client used to render the videos for o!rdr.
+## API
 
-Anyone with this client can contribute and render osu! videos for API and website users of o!rdr.
+Every route except `GET /health` requires the header `X-Render-Key: <RENDER_API_KEY>`.
 
-Please join the [o!rdr Discord server](https://discord.com/invite/vJpskzepCZ) if you want to apply or get more informations about the client.
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/renders` | multipart: `replayFile` (a headered `.osr`), `beatmapsetId` (required: the map is fetched from the mirror by set id), optional `beatmapMd5`, `scoreId`, `source`, `username`, `resolution` (`1280x720` default, `960x540`, `1920x1080`, `640x480` turbo), `skin` (folder name, id from `/skins`, or `default`), and the option fields `showPPCounter`, `showHitErrorMeter`, `showResultScreen`, `showDanserLogo`, `loadVideo`, `loadStoryboard` (`true`/`false`), `inGameBGDim` (0-100), `cursorSize` (0.5-2). Answers `201 {message, renderID, errorCode: 0}` or `4xx/5xx {message, errorCode}`. |
+| `GET` | `/renders?renderID=N` | `{renders: [render], maxRenders}`; without `renderID`, the latest 50. A render carries `renderID, status (queued/rendering/done/failed), progress ("Waiting", "Rendering (45%)", "Encoding", "Finalizing", "Done", "Failed"), queuePosition, videoUrl (/videos/N.mp4 when done), errorCode, errorMessage, replayUsername, mapTitle, replayMods, resolution, skin, options, source, scoreId, beatmapsetId, beatmapMd5, date, removed, startedAt, finishedAt`. |
+| `GET` | `/skins` | `{skins: [{id, skin, presentationName}]}`: id 0 is danser's built-in default, the rest are the folders in `SKINS_DIR`. |
+| `GET` | `/videos/N.mp4` | The finished video, with HTTP Range support (`206`). `renderN.mp4` is accepted too. |
+| `GET` | `/health` | `{ok, version, queued, rendering, slots, danserVersion, fake}` (no key needed). |
 
-## How to use
+Error codes reuse o!rdr's numbers where the meaning matches: 2 replay unparseable,
+5 replay corrupted or oversized, 6 not osu!standard, 7 no input data, 8 map not
+available on the mirror (also: the replay's difficulty is not in the set), 11
+autoplay, 12 invalid request field, 21 danser failed (the message carries the log
+tail), 26 incompatible mods, 29 the same `scoreId` is already queued or rendering,
+40 queue full.
 
-### Run from source
+## Configuration (environment)
 
-NodeJS v22+ is required.
+| Variable | Default | Meaning |
+|---|---|---|
+| `RENDER_API_KEY` | (none) | Required unless `RENDER_FAKE=1`; the worker refuses to start without it. |
+| `PORT` | `3002` | |
+| `RENDER_CONCURRENCY` | `2` | Render slots; each gets its own Xvfb display (`:10`, `:11`, ...) and working dir. |
+| `RENDER_THREADS_PER_SLOT` | `4` | `LP_NUM_THREADS` for llvmpipe in each slot. |
+| `RENDER_TIMEOUT_MIN` | `90` | A render past this is killed and marked failed (code 21). |
+| `RENDER_STALL_SEC` | `90` | No output growth for this long is treated as a wedged danser. |
+| `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`). |
+| `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
+| `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |
+| `MIRROR_BASE` | `http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100` | `GET <MIRROR_BASE>/d/<beatmapsetId>` must answer the `.osz`. |
+| `MIRROR_USER_AGENT` | `ordr-render/1.0 (+https://fishy.moe)` | |
+| `VIDEOS_DIR`, `SONGS_DIR`, `SKINS_DIR`, `STATE_DIR`, `WORK_DIR` | `./data/...`, `./work` (image: `/data/...`, `/work`) | Finished videos; the `.osz` cache; skins; the journal (`renders.json`) and pending replays; per-slot scratch. |
+| `DANSER_DIR` | `./bins/danser` (image: `/app/bins/danser`) | Where `danser-cli` lives; copied per slot at boot. |
+| `RENDER_FAKE` | unset | `1`: no Xvfb/danser; a render walks to done in ~10 s with a 1-second black MP4 (ffmpeg). |
+| `RENDER_DEBUG` | unset | `1`: log every danser line. |
 
-1. Clone the repository
-2. Run `npm ci` at the root folder of the o!rdr client to install dependencies
-3. Run `npm start` to launch it
-4. Follow the instructions, dependencies like danser will be downloaded automatically
+## Build and run
 
-### Run from a build
+```
+docker build -t ordr-render .
+docker run --rm -p 3002:3002 -e RENDER_API_KEY=change-me \
+  -v render-videos:/data/videos -v render-songs:/data/songs -v render-skins:/data/skins -v render-state:/data/state \
+  --cpus 8 --memory 12g ordr-render
+```
 
-1. Download the latest release executable for your operating system
-2. Copy it in a dedicated folder for the o!rdr client
-3. Run the client by double-clicking on the downloaded executable (not recommended as it will close itself on fatal errors) or via the terminal (`./ordr-client-vXX-linux` or `./ordr-client-vXX-win.exe` on Windows)
-4. Follow the instructions, dependencies like danser will be downloaded automatically
+The image runs as uid 1001; volumes mounted from the host must be writable by it.
+Rendering on CPU is slow: budget several times the map length per render at
+1280x720@30 and scale by adding slots (each needs its own CPU budget), not cores.
 
-### Run a benchmark only
-
-When running the client from source, run `npm run benchmark` to only perform a benchmark.
-
-When running the client with an executable, run it via the terminal using the benchmark argument `--benchmark`.
-
-## Config
-
-Important keys that shouldn't be shared with anyone are in the `keys.json` file.
-
-This file contains the key to authenticate with the o!rdr server, and your osu! API v2 keys if you added them.
-
-Adding your osu! API v2 keys is useful to receive renders requiring showing a scoreboard and therefore needs to fetch data from the osu! API (v2).
-
--   `encoder`: can be `cpu`, `nvenc` (for NVIDIA GPUs), `qsv` (for Intel GPUs)
--   `capabilities`: enable or disable capabilities to the client. If your computer is performant enough, you can enable the `danser.motion_blur` and `danser.uhd` to receive render jobs with motion blur or 4K resolution
--   `debug`: log more things to the terminal
--   `log_timestamps`: prepend a timestamp in your local time before every log line
--   `discord_presence`: use the discord rich presence or not
--   `customization`: change the way your renderer name looks on the website! Changes made to this field are hotswappable and changes are effective almost instantly
-
-Available options for customization text_color: `salmon`, `azure`, `emerald`, `pear`, `pumpkin`, `red`, `teal-blue`, `cream`, `silver-coin`, `botany`, `calm-gold`, `limestone`, `alpine-morning-blue`, `transluscent-white`, `yellow-orange`, `algae-green`. Empty string for default white.
-
-Available options for customization background_type: from 0 (none) to 6 included.
+From source: `npm ci && npm run build && RENDER_FAKE=1 npm start`.

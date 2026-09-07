@@ -1,8 +1,0 @@
-{
-    "prettier.trailingComma": "none",
-    "prettier.semi": false,
-    "prettier.quoteProps": "preserve",
-    "prettier.printWidth": 500,
-    "vscord.status.details.enabled": true,
-    "vscord.app.privacyMode.enable": false
-}
