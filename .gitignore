@@ -1,10 +1,7 @@
 node_modules
 bins/
-keys*.json
-config*.json
-.history/
-crashes/
-data/
-backup/
 build/
-references/
+data/
+work/
+.history/
+*.log

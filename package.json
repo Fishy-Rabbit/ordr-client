@@ -1,40 +1,26 @@
 {
-    "name": "ordr-client",
-    "version": "29",
-    "description": "The client used to render videos on https://ordr.issou.best",
-    "main": "src/main.ts",
+    "name": "ordr-render",
+    "version": "1.0.0",
+    "description": "Self-hosted osu! replay render worker (danser under Xvfb) speaking a subset of the o!rdr API. Fork of MasterIO02/ordr-client.",
+    "main": "build/main.js",
     "scripts": {
-        "start-dev": "npx nodemon src/main.ts",
-        "start": "ts-node src/main.ts",
-        "benchmark": "ts-node src/main.ts --benchmark",
-        "build": "npx tsc"
+        "build": "tsc -p tsconfig.json",
+        "start": "node build/main.js",
+        "typecheck": "tsc -p tsconfig.json --noEmit"
     },
-    "author": "MasterIO",
-    "license": "MIT",
+    "author": "Fishy-Rabbit",
+    "license": "BSD-3-Clause",
+    "engines": {
+        "node": ">=22"
+    },
     "dependencies": {
         "adm-zip": "^0.5.16",
-        "chokidar": "^4.0.3",
-        "discord-rich-presence": "^0.0.8",
-        "fs-extra": "^11.3.0",
-        "inquirer": "^12.6.3",
-        "socket.io-client": "^4.8.1",
-        "systeminformation": "^5.27.7",
-        "undici": "^7.19.2",
-        "zod": "^3.25.27"
+        "busboy": "^1.6.0"
     },
     "devDependencies": {
         "@types/adm-zip": "^0.5.7",
-        "@types/discord-rich-presence": "^0.0.2",
-        "@types/fs-extra": "^11.0.4",
-        "@types/inquirer": "^9.0.8",
-        "eslint": "^7.32.0",
-        "nodemon": "^3.1.10",
-        "ts-node": "^10.9.2",
+        "@types/busboy": "^1.5.4",
+        "@types/node": "^22.15.0",
         "typescript": "^5.8.3"
-    },
-    "nodemonConfig": {
-        "ignore": [
-            "bins/*"
-        ]
     }
 }
