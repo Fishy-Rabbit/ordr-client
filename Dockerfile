@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb xauth xfonts-base x11-xserver-utils \
         libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 \
-        libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libasound2 \
+        libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libasound2 libgtk-3-0 \
         fonts-dejavu fonts-noto-cjk ca-certificates curl unzip ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
