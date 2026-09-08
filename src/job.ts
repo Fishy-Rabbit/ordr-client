@@ -5,7 +5,7 @@ import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { spawn } from "child_process"
 import AdmZip from "adm-zip"
-import { Config, PRESETS } from "./config"
+import { Config, PRESETS, isHinaiMirrorUrl } from "./config"
 import { Journal, RenderRecord } from "./journal"
 import { buildDanserSettings, DEFAULT_OPTIONS, Json, RenderOptions, writeSlotSettings } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
@@ -106,6 +106,44 @@ export function parseOptions(raw: Record<string, string | number | boolean>): Re
     return o
 }
 
+/**
+ * Fetch from the mirror without ever leaving it. Redirects are NOT followed
+ * blindly: the hinai mirror can be configured to answer 307s toward upstream
+ * mirrors (its "redirect" mode), and following one would pull the bytes from
+ * a third party, which this renderer must never do. One hop is allowed when
+ * it stays on a hinai mirror host; anything else is refused.
+ */
+async function fetchFromMirror(cfg: Config, url: string): Promise<Response> {
+    if (!isHinaiMirrorUrl(url)) throw new Error(`${url} is not on a hinai mirror host; refusing`)
+    const headers = { "User-Agent": cfg.mirrorUserAgent, Accept: "application/octet-stream, */*" }
+    const signal = AbortSignal.timeout(10 * 60_000)
+    let res: Response
+    try {
+        res = await fetch(url, { headers, redirect: "manual", signal })
+    } catch (err) {
+        throw new Error(`the mirror could not be reached (${(err as Error).message})`)
+    }
+    if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location") || ""
+        let next = ""
+        try {
+            next = location ? new URL(location, url).toString() : ""
+        } catch {
+            next = ""
+        }
+        if (!next || !isHinaiMirrorUrl(next)) {
+            throw new Error(`the mirror redirected to ${next ? new URL(next).hostname : "an unreadable location"}, which is not a hinai mirror host; refusing`)
+        }
+        try {
+            res = await fetch(next, { headers, redirect: "manual", signal })
+        } catch (err) {
+            throw new Error(`the mirror could not be reached (${(err as Error).message})`)
+        }
+        if (res.status >= 300 && res.status < 400) throw new Error("the mirror redirected twice; refusing")
+    }
+    return res
+}
+
 type OszResult = { ok: true; path: string } | { ok: false; message: string }
 
 /** The .osz for a set, from the songs cache or fetched from the mirror by set id. */
@@ -116,13 +154,9 @@ async function ensureOsz(cfg: Config, setId: number, log: (line: string) => void
     log(`fetching set ${setId} from the mirror`)
     let res: Response
     try {
-        res = await fetch(url, {
-            headers: { "User-Agent": cfg.mirrorUserAgent, Accept: "application/octet-stream, */*" },
-            redirect: "follow",
-            signal: AbortSignal.timeout(10 * 60_000)
-        })
+        res = await fetchFromMirror(cfg, url)
     } catch (err) {
-        return { ok: false, message: `map not available on the mirror: the mirror could not be reached (${(err as Error).message})` }
+        return { ok: false, message: `map not available on the mirror: ${(err as Error).message}` }
     }
     if (res.status === 404) return { ok: false, message: `map not available on the mirror (set ${setId} answered 404)` }
     if (!res.ok || !res.body) return { ok: false, message: `map not available on the mirror (set ${setId} answered HTTP ${res.status})` }

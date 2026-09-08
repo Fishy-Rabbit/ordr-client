@@ -25,6 +25,18 @@ extra skin folders (an `.osk` is a zip) into `SKINS_DIR` yourself.
 
 ## API
 
+## Map source: the hinai mirror, and nothing else
+
+This worker fetches beatmaps from ONE place: the hinai beatmap mirror
+(`rust-service/hinai-beatmap-mirror` in the Hinamizawa repo), through its
+byte-streaming route `/api/v1/hinai/d/{setId}`. There is no fallback, no
+cascade and no other mirror in this code base, and two guards keep it that way:
+the process refuses to start when `MIRROR_BASE` is not a hinai mirror host
+(`HINAI_MIRROR_HOSTS` in `src/config.ts`, not overridable by environment), and
+redirects are followed only when they stay on a hinai mirror host, so a mirror
+running in redirect mode can never hand this worker a third-party URL. If the
+hinai mirror does not have a set, the render fails with code 8.
+
 Every route except `GET /health` requires the header `X-Render-Key: <RENDER_API_KEY>`.
 
 | Method | Path | Notes |

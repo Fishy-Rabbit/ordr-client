@@ -55,6 +55,34 @@ function str(name: string, fallback: string): string {
     return raw === undefined || raw === "" ? fallback : raw
 }
 
+/**
+ * The ONLY hosts this worker may fetch beatmaps from: the hinai beatmap mirror
+ * (`rust-service/hinai-beatmap-mirror` in the Hinamizawa repo) by its
+ * in-cluster service names and its public hostnames. Operator ruling
+ * 2026-09-08: the renderer integrates with the hinai mirror and nothing else,
+ * so a MIRROR_BASE pointing anywhere else is a misconfiguration and the process
+ * refuses to start. Deliberately not overridable by environment.
+ */
+export const HINAI_MIRROR_HOSTS: ReadonlySet<string> = new Set([
+    "beatmap-mirror.hinai-rusty-mirror.svc.cluster.local",
+    "beatmap-mirror.hinai-rusty-mirror.svc",
+    "beatmap-mirror-ro.hinai-rusty-mirror.svc.cluster.local",
+    "stg-beatmap-mirror.staging.svc.cluster.local",
+    "mirror.hinamizawa.ai",
+    "hinamizawa.ai"
+])
+
+/** True when the URL's host is one of the hinai mirror hosts (a bad URL is false). */
+export function isHinaiMirrorUrl(url: string): boolean {
+    let host: string
+    try {
+        host = new URL(url).hostname.toLowerCase()
+    } catch {
+        return false
+    }
+    return HINAI_MIRROR_HOSTS.has(host)
+}
+
 function flag(name: string): boolean {
     const raw = (process.env[name] ?? "").trim().toLowerCase()
     return raw === "1" || raw === "true" || raw === "yes" || raw === "on"
@@ -98,6 +126,9 @@ export function loadConfig(): Config {
     }
     if (!cfg.apiKey && !cfg.fake) {
         throw new Error("RENDER_API_KEY is not set. Refusing to start an unauthenticated renderer: set it, or set RENDER_FAKE=1 for the development stub.")
+    }
+    if (!cfg.fake && !isHinaiMirrorUrl(cfg.mirrorBase)) {
+        throw new Error(`MIRROR_BASE (${cfg.mirrorBase}) is not the hinai beatmap mirror. This renderer fetches maps from the hinai mirror only (README, "Map source"); refusing to start.`)
     }
     return cfg
 }
