@@ -6,7 +6,7 @@ import Busboy from "busboy"
 import { Config, DEFAULT_RESOLUTION, PRESETS, VERSION } from "./config"
 import { Journal, RenderOptionValues, RenderRecord } from "./journal"
 import { Scheduler } from "./queue"
-import { listSkins, resolveSkin } from "./skins"
+import { defaultSkinFolder, listSkins, resolveSkin } from "./skins"
 import { MOD_AUTOPLAY, parseReplayHeader, ReplayHeader, ReplayParseError } from "./osr"
 import { replayPath } from "./job"
 
@@ -111,7 +111,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         const resolution = f.resolution?.trim() || DEFAULT_RESOLUTION
         if (!PRESETS[resolution]) throw new HttpError(400, 12, `unsupported resolution ${resolution}; one of ${Object.keys(PRESETS).join(", ")}`)
 
-        const skin = resolveSkin(cfg.skinsDir, f.skin ?? "")
+        // `default` (or nothing) is the server default; `danser` the built-in.
+        // The record keeps the RESOLVED folder so GET /renders reports what
+        // danser was actually given.
+        const skin = resolveSkin(cfg.skinsDir, f.skin ?? "", cfg.defaultSkin)
         if (skin === null) throw new HttpError(400, 12, `unknown skin ${f.skin}; see GET /skins`)
 
         const options: RenderOptionValues = {}
@@ -234,7 +237,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             const renders = journal.latest(50).map(r => toApi(r, scheduler.queuePosition(r)))
             return sendJson(res, 200, { renders, maxRenders: renders.length })
         }
-        if (route === "/skins" && method === "GET") return sendJson(res, 200, { skins: listSkins(cfg.skinsDir) })
+        if (route === "/skins" && method === "GET") return sendJson(res, 200, { skins: listSkins(cfg.skinsDir, cfg.defaultSkin), default: defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin) })
         if (route.startsWith("/videos/") && (method === "GET" || method === "HEAD")) return serveVideo(req, res, path.posix.basename(route))
         throw new HttpError(404, 404, "not found")
     }

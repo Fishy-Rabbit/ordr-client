@@ -33,6 +33,8 @@ export type Config = {
     videosDir: string
     songsDir: string
     skinsDir: string
+    /** Folder under skinsDir that the wire value `default` resolves to; "" = danser's built-in. */
+    defaultSkin: string
     stateDir: string
     replaysDir: string
     workDir: string
@@ -116,6 +118,11 @@ export function loadConfig(): Config {
         videosDir: path.resolve(str("VIDEOS_DIR", path.join(cwd, "data", "videos"))),
         songsDir: path.resolve(str("SONGS_DIR", path.join(cwd, "data", "songs"))),
         skinsDir: path.resolve(str("SKINS_DIR", path.join(cwd, "data", "skins"))),
+        // The skin every render uses unless the client picks another one. The
+        // panels send `default` when their skin field is left empty, and this is
+        // what `default` means. A folder name under SKINS_DIR; unset = danser's
+        // built-in skin.
+        defaultSkin: str("RENDER_DEFAULT_SKIN", "").trim(),
         stateDir,
         replaysDir: path.resolve(str("REPLAYS_DIR", path.join(stateDir, "replays"))),
         workDir: path.resolve(str("WORK_DIR", path.join(cwd, "work"))),

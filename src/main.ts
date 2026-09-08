@@ -8,6 +8,7 @@ import { generateSettingsTemplate, prepareSlotDirs, SlotPaths } from "./job"
 import { Json } from "./renderers/danser/prepare"
 import { Scheduler } from "./queue"
 import { createServer } from "./server"
+import { defaultSkinFolder } from "./skins"
 
 injectTimestamp()
 const log = (line: string) => console.log(line)
@@ -16,6 +17,12 @@ async function main(): Promise<void> {
     const cfg = loadConfig()
     log(`ordr-render ${VERSION} starting (${cfg.fake ? "FAKE mode" : `danser ${cfg.danserVersion}, ${cfg.concurrency} slot(s) x ${cfg.threadsPerSlot} threads`})`)
     for (const dir of [cfg.videosDir, cfg.songsDir, cfg.skinsDir, cfg.stateDir, cfg.replaysDir, cfg.workDir]) fs.mkdirSync(dir, { recursive: true })
+
+    // The default skin is resolved per request (the folder may land while the
+    // worker runs), so a missing one is a warning here, never a refusal.
+    if (cfg.defaultSkin === "") log(`default skin: danser's built-in (RENDER_DEFAULT_SKIN unset)`)
+    else if (defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin)) log(`default skin: ${cfg.defaultSkin} (${cfg.skinsDir}/${cfg.defaultSkin})`)
+    else log(`WARNING: RENDER_DEFAULT_SKIN=${cfg.defaultSkin} but ${path.join(cfg.skinsDir, cfg.defaultSkin)} is not a folder; \`default\` renders with danser's built-in skin until it exists`)
 
     const journal = new Journal(cfg.stateDir)
     journal.load()

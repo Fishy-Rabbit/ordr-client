@@ -21,7 +21,12 @@ server.
 danser-go is GPL-3.0 and runs as a separate process. The Docker image downloads
 the pinned release zip once at build time (sha256-checked) and never downloads
 anything at runtime. The zip ships danser's built-in default skin only; drop any
-extra skin folders (an `.osk` is a zip) into `SKINS_DIR` yourself.
+extra skin folders (an `.osk` is a zip) into `SKINS_DIR` yourself and name one of
+them in `RENDER_DEFAULT_SKIN` to make it the server default: the wire value
+`default` (what a panel sends when its skin field is left empty) then means that
+folder, and `danser` is the built-in under its own name. Missing elements fall
+back to the built-in; the default is resolved per request, so a folder that lands
+while the worker runs becomes live without a restart.
 
 ## API
 
@@ -41,9 +46,9 @@ Every route except `GET /health` requires the header `X-Render-Key: <RENDER_API_
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/renders` | multipart: `replayFile` (a headered `.osr`), `beatmapsetId` (required: the map is fetched from the mirror by set id), optional `beatmapMd5`, `scoreId`, `source`, `username`, `resolution` (`1280x720` default, `960x540`, `1920x1080`, `640x480` turbo), `skin` (folder name, id from `/skins`, or `default`), and the option fields `showPPCounter`, `showHitErrorMeter`, `showResultScreen`, `showDanserLogo`, `loadVideo`, `loadStoryboard` (`true`/`false`), `inGameBGDim` (0-100), `cursorSize` (0.5-2). Answers `201 {message, renderID, errorCode: 0}` or `4xx/5xx {message, errorCode}`. |
+| `POST` | `/renders` | multipart: `replayFile` (a headered `.osr`), `beatmapsetId` (required: the map is fetched from the mirror by set id), optional `beatmapMd5`, `scoreId`, `source`, `username`, `resolution` (`1280x720` default, `960x540`, `1920x1080`, `640x480` turbo), `skin` (folder name, id or display name from `/skins`, `default` = the server default, `danser` = the built-in; omitted = `default`), and the option fields `showPPCounter`, `showHitErrorMeter`, `showResultScreen`, `showDanserLogo`, `loadVideo`, `loadStoryboard` (`true`/`false`), `inGameBGDim` (0-100), `cursorSize` (0.5-2). Answers `201 {message, renderID, errorCode: 0}` or `4xx/5xx {message, errorCode}`. |
 | `GET` | `/renders?renderID=N` | `{renders: [render], maxRenders}`; without `renderID`, the latest 50. A render carries `renderID, status (queued/rendering/done/failed), progress ("Waiting", "Rendering (45%)", "Encoding", "Finalizing", "Done", "Failed"), queuePosition, videoUrl (/videos/N.mp4 when done), errorCode, errorMessage, replayUsername, mapTitle, replayMods, resolution, skin, options, source, scoreId, beatmapsetId, beatmapMd5, date, removed, startedAt, finishedAt`. |
-| `GET` | `/skins` | `{skins: [{id, skin, presentationName}]}`: id 0 is danser's built-in default, the rest are the folders in `SKINS_DIR`. |
+| `GET` | `/skins` | `{skins: [{id, skin, presentationName, resolvesTo?}], default}`: id 0 is always the wire value `default` (the server default when `RENDER_DEFAULT_SKIN` names an existing folder, presented as `Server default: <skin.ini Name>` with `resolvesTo` = the folder; otherwise danser's built-in), then `danser` (the built-in under its own name, only when a server default exists), then the folders in `SKINS_DIR` in sorted order, the default folder included under its own name. `default` at the top level is the resolved default folder or `null`. |
 | `GET` | `/videos/N.mp4` | The finished video, with HTTP Range support (`206`). `renderN.mp4` is accepted too. |
 | `GET` | `/health` | `{ok, version, queued, rendering, slots, danserVersion, fake}` (no key needed). |
 
@@ -71,6 +76,7 @@ tail), 26 incompatible mods, 29 the same `scoreId` is already queued or renderin
 | `MIRROR_DOWNLOAD_PATH` | `/api/v1/hinai/d/{id}` | Appended to `MIRROR_BASE` with `{id}` = beatmapsetId; must answer the `.osz` bytes (a JSON resolver answer fails the render with code 8). |
 | `MIRROR_USER_AGENT` | `ordr-render/1.0 (+https://fishy.moe)` | |
 | `VIDEOS_DIR`, `SONGS_DIR`, `SKINS_DIR`, `STATE_DIR`, `WORK_DIR` | `./data/...`, `./work` (image: `/data/...`, `/work`) | Finished videos; the `.osz` cache; skins; the journal (`renders.json`) and pending replays; per-slot scratch. |
+| `RENDER_DEFAULT_SKIN` | unset | A folder name under `SKINS_DIR` that the wire value `default` (and an omitted `skin`) resolves to; unset = danser's built-in. A missing folder is a boot warning, not a refusal, and `default` renders with the built-in until it exists. |
 | `DANSER_DIR` | `./bins/danser` (image: `/app/bins/danser`) | Where `danser-cli` lives; copied per slot at boot. |
 | `RENDER_FAKE` | unset | `1`: no Xvfb/danser; a render walks to done in ~10 s with a 1-second black MP4 (ffmpeg). |
 | `RENDER_DEBUG` | unset | `1`: log every danser line. |
