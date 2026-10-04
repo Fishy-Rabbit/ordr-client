@@ -1,5 +1,6 @@
 import fs from "fs"
 import path from "path"
+import { serverFor } from "./fleet"
 
 export type RenderStatus = "queued" | "rendering" | "done" | "failed"
 
@@ -20,6 +21,8 @@ export type RenderRecord = {
     skin: string
     options: RenderOptionValues
     source: string
+    /** The site the job came from ("fishy", "kawata", ...): the shared queue's key. */
+    server: string
     scoreId: string | null
     beatmapsetId: number | null
     beatmapMd5: string | null
@@ -30,7 +33,7 @@ export type RenderRecord = {
     slot: number | null
 }
 
-type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "scoreId" | "beatmapsetId" | "beatmapMd5">
+type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5">
 
 type JournalFile = { version: 1; nextRenderID: number; renders: RenderRecord[] }
 
@@ -56,6 +59,8 @@ export class Journal {
         const renders = Array.isArray(parsed.renders) ? parsed.renders : []
         let maxId = 0
         for (const r of renders) {
+            // Records written before the shared queue carry no server; read it from source.
+            if (!r.server) r.server = serverFor(undefined, r.source ?? "")
             this.byId.set(r.renderID, r)
             if (r.renderID > maxId) maxId = r.renderID
         }
@@ -141,8 +146,19 @@ export class Journal {
         return { queued, rendering }
     }
 
-    findActiveByScore(scoreId: string): RenderRecord | undefined {
-        return this.data.renders.find(r => r.scoreId === scoreId && (r.status === "queued" || r.status === "rendering"))
+    /** An active job for this score from this server; score ids are only unique within one server. */
+    findActiveByScore(server: string, scoreId: string): RenderRecord | undefined {
+        return this.data.renders.find(r => r.server === server && r.scoreId === scoreId && (r.status === "queued" || r.status === "rendering"))
+    }
+
+    /** The latest finished or failed renders, newest first. */
+    recentFinished(n: number): RenderRecord[] {
+        const out: RenderRecord[] = []
+        for (let i = this.data.renders.length - 1; i >= 0 && out.length < n; i--) {
+            const r = this.data.renders[i]
+            if (r.status === "done" || r.status === "failed") out.push(r)
+        }
+        return out
     }
 
     latest(n: number): RenderRecord[] {

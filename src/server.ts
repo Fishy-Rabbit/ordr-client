@@ -9,6 +9,7 @@ import { Scheduler } from "./queue"
 import { defaultSkinFolder, listSkins, resolveSkin } from "./skins"
 import { MOD_AUTOPLAY, parseReplayHeader, ReplayHeader, ReplayParseError } from "./osr"
 import { replayPath } from "./job"
+import { etaByRender, progressPercent, serverCounts, serverFor, Typical, typicalDuration } from "./fleet"
 
 const OPTION_KEYS = ["showPPCounter", "showHitErrorMeter", "showResultScreen", "showDanserLogo", "loadVideo", "loadStoryboard", "inGameBGDim", "cursorSize"] as const
 
@@ -37,7 +38,7 @@ function keyMatches(expected: string, given: string | undefined): boolean {
 }
 
 /** The wire shape of one render: the o!rdr fields plus this worker's extras. */
-function toApi(record: RenderRecord, queuePosition: number): Record<string, unknown> {
+function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: number | undefined; typical: Typical }): Record<string, unknown> {
     const playable = record.status === "done" && !record.removed && record.videoFile !== null
     return {
         renderID: record.renderID,
@@ -54,13 +55,38 @@ function toApi(record: RenderRecord, queuePosition: number): Record<string, unkn
         skin: record.skin,
         options: record.options,
         source: record.source,
+        server: record.server,
         scoreId: record.scoreId,
         beatmapsetId: record.beatmapsetId,
         beatmapMd5: record.beatmapMd5,
         date: record.date,
         removed: record.removed,
         startedAt: record.startedAt,
-        finishedAt: record.finishedAt
+        finishedAt: record.finishedAt,
+        // One estimate over the whole shared queue, so every site prints the same number.
+        etaSeconds: eta && eta.seconds !== undefined ? eta.seconds : null,
+        etaBasis: eta && eta.seconds !== undefined ? eta.typical.basis : null
+    }
+}
+
+/** One job in the shared queue view: what staff on any site need to read it, nothing more. */
+function toQueueJob(record: RenderRecord, queuePosition: number, eta: number | undefined): Record<string, unknown> {
+    return {
+        renderID: record.renderID,
+        server: record.server,
+        status: record.status,
+        queuePosition,
+        progress: record.progress,
+        progressPercent: progressPercent(record.progress),
+        etaSeconds: eta ?? null,
+        replayUsername: record.replayUsername,
+        mapTitle: record.mapTitle,
+        beatmapsetId: record.beatmapsetId,
+        scoreId: record.scoreId,
+        date: record.date,
+        startedAt: record.startedAt,
+        finishedAt: record.finishedAt,
+        errorMessage: record.status === "failed" ? record.errorMessage : ""
     }
 }
 
@@ -99,7 +125,46 @@ function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promi
 export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler, log: (line: string) => void): http.Server {
     const health = () => {
         const counts = journal.counts()
-        return { ok: true, version: VERSION, queued: counts.queued, rendering: counts.rendering, slots: scheduler.slotCount, danserVersion: cfg.fake ? null : cfg.danserVersion, fake: cfg.fake }
+        const typical = typicalDuration(journal)
+        return {
+            ok: true,
+            version: VERSION,
+            queued: counts.queued,
+            rendering: counts.rendering,
+            slots: scheduler.slotCount,
+            maxQueue: cfg.maxQueue,
+            typicalSeconds: typical.seconds,
+            typicalBasis: typical.basis,
+            servers: serverCounts(journal),
+            danserVersion: cfg.fake ? null : cfg.danserVersion,
+            fake: cfg.fake
+        }
+    }
+
+    /** The shared queue for staff on every site: active jobs (rendering, then FIFO) plus the latest finished ones. */
+    const queueView = (recentLimit: number) => {
+        const counts = journal.counts()
+        const typical = typicalDuration(journal)
+        const eta = etaByRender(journal, scheduler.slotCount, typical)
+        const active = journal.all().filter(r => r.status === "rendering").concat(journal.queued())
+        return {
+            slots: scheduler.slotCount,
+            maxQueue: cfg.maxQueue,
+            queued: counts.queued,
+            rendering: counts.rendering,
+            typicalSeconds: typical.seconds,
+            typicalBasis: typical.basis,
+            servers: serverCounts(journal),
+            jobs: active.map(r => toQueueJob(r, scheduler.queuePosition(r), eta.get(r.renderID))),
+            recent: journal.recentFinished(recentLimit).map(r => toQueueJob(r, 0, undefined))
+        }
+    }
+
+    /** Every render's wire shape, with the shared ETA computed once for the batch. */
+    const withEta = (records: RenderRecord[]) => {
+        const typical = typicalDuration(journal)
+        const eta = etaByRender(journal, scheduler.slotCount, typical)
+        return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), typical }))
     }
 
     const submit = async (req: http.IncomingMessage): Promise<{ renderID: number }> => {
@@ -141,8 +206,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         const beatmapMd5 = header?.beatmapMd5 ?? (/^[0-9a-f]{32}$/.test(formMd5) ? formMd5 : null)
         if (header && formMd5 && formMd5 !== header.beatmapMd5) log(`submit: form beatmapMd5 ${formMd5} differs from the replay's ${header.beatmapMd5}; trusting the replay`)
 
+        const source = (f.source ?? "").trim().slice(0, 64)
+        const server = serverFor(f.server, source)
         const scoreId = (f.scoreId ?? "").trim() || null
-        if (scoreId && journal.findActiveByScore(scoreId)) throw new HttpError(409, 29, `score ${scoreId} is already queued or rendering`)
+        if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
         if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
 
         const record = journal.create({
@@ -152,7 +219,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             resolution,
             skin,
             options,
-            source: (f.source ?? "").trim().slice(0, 64),
+            source,
+            server,
             scoreId,
             beatmapsetId,
             beatmapMd5
@@ -163,7 +231,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             journal.update(record.renderID, { status: "failed", progress: "Failed", errorCode: 21, errorMessage: `could not store the replay: ${(err as Error).message}`, finishedAt: new Date().toISOString() })
             throw new HttpError(500, 21, `could not store the replay: ${(err as Error).message}`)
         }
-        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, source ${record.source || "-"}, score ${scoreId ?? "-"})`)
+        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, server ${server}, source ${record.source || "-"}, score ${scoreId ?? "-"})`)
         scheduler.tick()
         return { renderID: record.renderID }
     }
@@ -231,11 +299,16 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             const raw = url.searchParams.get("renderID")
             if (raw !== null && raw !== "") {
                 const record = journal.get(Number(raw))
-                const renders = record ? [toApi(record, scheduler.queuePosition(record))] : []
+                const renders = record ? withEta([record]) : []
                 return sendJson(res, 200, { renders, maxRenders: renders.length })
             }
-            const renders = journal.latest(50).map(r => toApi(r, scheduler.queuePosition(r)))
+            const renders = withEta(journal.latest(50))
             return sendJson(res, 200, { renders, maxRenders: renders.length })
+        }
+        if (route === "/queue" && method === "GET") {
+            const asked = Number(url.searchParams.get("recent") ?? 25)
+            const recent = Number.isFinite(asked) ? Math.max(0, Math.min(100, Math.floor(asked))) : 25
+            return sendJson(res, 200, queueView(recent))
         }
         if (route === "/skins" && method === "GET") return sendJson(res, 200, { skins: listSkins(cfg.skinsDir, cfg.defaultSkin), default: defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin) })
         if (route.startsWith("/videos/") && (method === "GET" || method === "HEAD")) return serveVideo(req, res, path.posix.basename(route))
