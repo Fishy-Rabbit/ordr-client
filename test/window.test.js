@@ -41,6 +41,7 @@ test("danser arguments: unchanged without a window, -start and -end appended wit
     const base = { replayPath: "/state/replays/7.osr", outName: "render7", settingsName: "slot0" }
     assert.deepEqual(danserArguments({ ...base, window: null }), ["-replay", "/state/replays/7.osr", "-out", "render7", "-noupdatecheck", "-skip", "-settings=slot0"])
     assert.deepEqual(danserArguments({ ...base, window: { start: 12, end: 32 } }), ["-replay", "/state/replays/7.osr", "-out", "render7", "-noupdatecheck", "-skip", "-settings=slot0", "-start=12", "-end=32"])
+    assert.deepEqual(danserArguments({ ...base, window: { start: 0, end: 5 } }), ["-replay", "/state/replays/7.osr", "-out", "render7", "-noupdatecheck", "-skip", "-settings=slot0", "-start=0", "-end=5"])
     assert.deepEqual(windowArgs(null), [])
 })
 
@@ -72,4 +73,6 @@ test("the journal stores a window, defaults it to null, and back-fills old journ
     const loaded = new Journal(old)
     loaded.load()
     assert.equal(loaded.get(1).window, null)
+    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(old, { recursive: true, force: true })
 })

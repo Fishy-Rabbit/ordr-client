@@ -9,6 +9,7 @@ import { Scheduler } from "./queue"
 import { defaultSkinFolder, listSkins, resolveSkin } from "./skins"
 import { MOD_AUTOPLAY, parseReplayHeader, ReplayHeader, ReplayParseError } from "./osr"
 import { replayPath } from "./job"
+import { parseRenderWindow, type RenderWindow } from "./window"
 import { etaByRender, progressPercent, serverCounts, serverFor, Typical, typicalDuration } from "./fleet"
 
 const OPTION_KEYS = ["showPPCounter", "showHitErrorMeter", "showResultScreen", "showDanserLogo", "loadVideo", "loadStoryboard", "inGameBGDim", "cursorSize"] as const
@@ -54,6 +55,7 @@ function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: num
         resolution: record.resolution,
         skin: record.skin,
         options: record.options,
+        window: record.window ?? null,
         source: record.source,
         server: record.server,
         scoreId: record.scoreId,
@@ -82,6 +84,7 @@ function toQueueJob(record: RenderRecord, queuePosition: number, eta: number | u
         replayUsername: record.replayUsername,
         mapTitle: record.mapTitle,
         beatmapsetId: record.beatmapsetId,
+        window: record.window ?? null,
         scoreId: record.scoreId,
         date: record.date,
         startedAt: record.startedAt,
@@ -167,7 +170,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), typical }))
     }
 
-    const submit = async (req: http.IncomingMessage): Promise<{ renderID: number }> => {
+    const submit = async (req: http.IncomingMessage): Promise<{ renderID: number; window: RenderWindow | null }> => {
         const sub = await readMultipart(req, cfg.maxReplayBytes)
         if (sub.truncated) throw new HttpError(413, 5, `the replay is larger than the ${Math.round(cfg.maxReplayBytes / 1048576)} MB limit`)
         if (!sub.replay || sub.replay.length === 0) throw new HttpError(400, 2, "missing replayFile")
@@ -184,6 +187,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
 
         const options: RenderOptionValues = {}
         for (const key of OPTION_KEYS) if (f[key] !== undefined) options[key] = f[key]
+        const win = parseRenderWindow(f.start, f.end)
+        if (!win.ok) throw new HttpError(400, 12, win.message)
 
         const beatmapsetId = Number(f.beatmapsetId)
         if (!Number.isInteger(beatmapsetId) || beatmapsetId <= 0) throw new HttpError(400, 8, "map not available on the mirror: beatmapsetId is required, the renderer fetches the map from the mirror by set id")
@@ -223,7 +228,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             server,
             scoreId,
             beatmapsetId,
-            beatmapMd5
+            beatmapMd5,
+            window: win.window
         })
         try {
             fs.writeFileSync(replayPath(cfg, record.renderID), sub.replay)
@@ -231,9 +237,9 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             journal.update(record.renderID, { status: "failed", progress: "Failed", errorCode: 21, errorMessage: `could not store the replay: ${(err as Error).message}`, finishedAt: new Date().toISOString() })
             throw new HttpError(500, 21, `could not store the replay: ${(err as Error).message}`)
         }
-        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, server ${server}, source ${record.source || "-"}, score ${scoreId ?? "-"})`)
+        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, server ${server}, source ${record.source || "-"}, score ${scoreId ?? "-"}${win.window ? `, window ${win.window.start}-${win.window.end}s` : ""})`)
         scheduler.tick()
-        return { renderID: record.renderID }
+        return { renderID: record.renderID, window: record.window }
     }
 
     const serveVideo = (req: http.IncomingMessage, res: http.ServerResponse, name: string): void => {
@@ -292,8 +298,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         }
 
         if (route === "/renders" && method === "POST") {
-            const { renderID } = await submit(req)
-            return sendJson(res, 201, { message: "Render queued", renderID, errorCode: 0 })
+            const { renderID, window } = await submit(req)
+            return sendJson(res, 201, { message: "Render queued", renderID, errorCode: 0, window })
         }
         if (route === "/renders" && method === "GET") {
             const raw = url.searchParams.get("renderID")

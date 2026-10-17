@@ -46,9 +46,9 @@ Every route except `GET /health` requires the header `X-Render-Key: <RENDER_API_
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/renders` | multipart: `replayFile` (a headered `.osr`), `beatmapsetId` (required: the map is fetched from the mirror by set id), optional `beatmapMd5`, `scoreId`, `source`, `server` (the site the job is for, e.g. `fishy` or `kawata`; omitted = read from `source`), `username`, `resolution` (`1280x720` default, `960x540`, `1920x1080`, `640x480` turbo), `skin` (folder name, id or display name from `/skins`, `default` = the server default, `danser` = the built-in; omitted = `default`), and the option fields `showPPCounter`, `showHitErrorMeter`, `showResultScreen`, `showDanserLogo`, `loadVideo`, `loadStoryboard` (`true`/`false`), `inGameBGDim` (0-100), `cursorSize` (0.5-2). Answers `201 {message, renderID, errorCode: 0}` or `4xx/5xx {message, errorCode}`. |
-| `GET` | `/renders?renderID=N` | `{renders: [render], maxRenders}`; without `renderID`, the latest 50. A render carries `renderID, status (queued/rendering/done/failed), progress ("Waiting", "Rendering (45%)", "Encoding", "Finalizing", "Done", "Failed"), queuePosition, videoUrl (/videos/N.mp4 when done), errorCode, errorMessage, replayUsername, mapTitle, replayMods, resolution, skin, options, source, server, scoreId, beatmapsetId, beatmapMd5, date, removed, startedAt, finishedAt, etaSeconds, etaBasis`. `etaSeconds` is set while queued or rendering, computed over the whole shared queue (see below). |
-| `GET` | `/queue?recent=N` | The shared queue for staff on every site: `{slots, maxQueue, queued, rendering, typicalSeconds, typicalBasis, servers, jobs, recent}`. `jobs` are the active renders (rendering first, then queued in FIFO order), `recent` the latest N finished or failed ones (default 25, max 100). Each entry: `renderID, server, status, queuePosition, progress, progressPercent, etaSeconds, replayUsername, mapTitle, beatmapsetId, scoreId, date, startedAt, finishedAt, errorMessage`. |
+| `POST` | `/renders` | multipart: `replayFile` (a headered `.osr`), `beatmapsetId` (required: the map is fetched from the mirror by set id), optional `beatmapMd5`, `scoreId`, `source`, `server` (the site the job is for, e.g. `fishy` or `kawata`; omitted = read from `source`), `username`, `resolution` (`1280x720` default, `960x540`, `1920x1080`, `640x480` turbo), `skin` (folder name, id or display name from `/skins`, `default` = the server default, `danser` = the built-in; omitted = `default`), and the option fields `showPPCounter`, `showHitErrorMeter`, `showResultScreen`, `showDanserLogo`, `loadVideo`, `loadStoryboard` (`true`/`false`), `inGameBGDim` (0-100), `cursorSize` (0.5-2), and `start` / `end` (whole seconds, both or neither; see Windowed renders below). Answers `201 {message, renderID, errorCode: 0, window}` or `4xx/5xx {message, errorCode}`. |
+| `GET` | `/renders?renderID=N` | `{renders: [render], maxRenders}`; without `renderID`, the latest 50. A render carries `renderID, status (queued/rendering/done/failed), progress ("Waiting", "Rendering (45%)", "Encoding", "Finalizing", "Done", "Failed"), queuePosition, videoUrl (/videos/N.mp4 when done), errorCode, errorMessage, replayUsername, mapTitle, replayMods, resolution, skin, options, source, server, scoreId, beatmapsetId, beatmapMd5, window, date, removed, startedAt, finishedAt, etaSeconds, etaBasis`. `etaSeconds` is set while queued or rendering, computed over the whole shared queue (see below). |
+| `GET` | `/queue?recent=N` | The shared queue for staff on every site: `{slots, maxQueue, queued, rendering, typicalSeconds, typicalBasis, servers, jobs, recent}`. `jobs` are the active renders (rendering first, then queued in FIFO order), `recent` the latest N finished or failed ones (default 25, max 100). Each entry: `renderID, server, status, queuePosition, progress, progressPercent, etaSeconds, replayUsername, mapTitle, beatmapsetId, scoreId, window, date, startedAt, finishedAt, errorMessage`. |
 | `GET` | `/skins` | `{skins: [{id, skin, presentationName, resolvesTo?}], default}`: id 0 is always the wire value `default` (the server default when `RENDER_DEFAULT_SKIN` names an existing folder, presented as `Server default: <skin.ini Name>` with `resolvesTo` = the folder; otherwise danser's built-in), then `danser` (the built-in under its own name, only when a server default exists), then the folders in `SKINS_DIR` in sorted order, the default folder included under its own name. `default` at the top level is the resolved default folder or `null`. |
 | `GET` | `/videos/N.mp4` | The finished video, with HTTP Range support (`206`). `renderN.mp4` is accepted too. |
 | `GET` | `/health` | `{ok, version, queued, rendering, slots, maxQueue, typicalSeconds, typicalBasis, servers, danserVersion, fake}` (no key needed). `servers` is `{<server>: {queued, rendering}}` for every server with an active job. |
@@ -71,6 +71,25 @@ estimate is computed here, once, over every job: the median length of the last
 the running jobs' remaining time read from their progress and the queued jobs
 handed to the earliest free slot in order. So a player on either site and staff
 on both admin panels read the same position and the same estimate.
+
+### Windowed renders (`start`, `end`)
+
+`POST /renders` takes two optional fields, `start` and `end`: whole seconds of
+song position (map time, the clock the replay frames and josu's SEEK use; with
+DT or NC it is not the video's own clock). They go together or not at all, and
+`0 <= start < end <= 86400`; anything else answers 400 code 12 and queues
+nothing. The job records them as `window: {start, end}` (`null` for a full
+render), and the `POST /renders` answer, `GET /renders` and `GET /queue` all
+carry it.
+
+The worker passes them to danser as `-start=<start>` and `-end=<end>`. danser
+drops every hit object outside the window before playback, so a windowed clip's
+score, combo, accuracy and pp counters start from zero at the window and do not
+match the full play. The worker therefore forces the results screen off
+(`Gameplay.ShowResultsScreen` false) whatever `showResultScreen` asked for, and
+a client labels such a clip as a window render. A full render's danser command
+is unchanged. The duplicate check is too: a window of a score that already has
+an active render from the same server answers code 29.
 
 ## Configuration (environment)
 
