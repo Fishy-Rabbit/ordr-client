@@ -9,6 +9,7 @@ import { Config, PRESETS, isHinaiMirrorUrl } from "./config"
 import { Journal, RenderRecord } from "./journal"
 import { buildDanserSettings, DEFAULT_OPTIONS, Json, RenderOptions, writeSlotSettings } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
+import { windowedOptions } from "./window"
 
 export type SlotPaths = { index: number; display: string; root: string; danserDir: string; songsDir: string; videosDir: string }
 
@@ -230,7 +231,7 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
     }
 
     journal.update(id, { status: "rendering", progress: "Rendering (preparing)", startedAt: new Date().toISOString(), slot: slot.index })
-    log(`render ${id} starting on slot ${slot.index} (${record.resolution}, skin ${record.skin})`)
+    log(`render ${id} starting on slot ${slot.index} (${record.resolution}, skin ${record.skin}${record.window ? `, window ${record.window.start}-${record.window.end}s` : ""})`)
 
     if (!fs.existsSync(osr)) return finishFail(5, "the replay file is no longer on disk")
     if (!record.beatmapsetId) return finishFail(8, "map not available on the mirror: no beatmapsetId was given")
@@ -257,7 +258,7 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
             skinsDir: cfg.skinsDir,
             outputDir: slot.videosDir,
             preset,
-            options: parseOptions(record.options),
+            options: windowedOptions(parseOptions(record.options), record.window ?? null),
             skin: record.skin || "default"
         })
         writeSlotSettings(slot.danserDir, `slot${slot.index}`, settings)
@@ -270,6 +271,7 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         replayPath: osr,
         outName: `render${id}`,
         settingsName: `slot${slot.index}`,
+        window: record.window ?? null,
         outputDir: slot.videosDir,
         env: slotEnv(cfg, slot),
         timeoutMs: cfg.timeoutMs,

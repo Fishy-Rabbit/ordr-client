@@ -9,6 +9,7 @@
 import fs from "fs"
 import path from "path"
 import { spawn, ChildProcess } from "child_process"
+import { RenderWindow, windowArgs } from "../../window"
 
 export type DanserOutcome = { success: true; videoPath: string } | { success: false; errorCode: number; errorMessage: string }
 
@@ -17,6 +18,8 @@ export type DanserRunArgs = {
     replayPath: string
     outName: string
     settingsName: string
+    /** The clip to render, or null for the full play (see src/window.ts). */
+    window: RenderWindow | null
     outputDir: string
     env: NodeJS.ProcessEnv
     timeoutMs: number
@@ -27,6 +30,11 @@ export type DanserRunArgs = {
 }
 
 const TAIL_LINES = 40
+
+/** The danser-cli command line for one render; a full render's is exactly what it always was. */
+export function danserArguments(a: Pick<DanserRunArgs, "replayPath" | "outName" | "settingsName" | "window">): string[] {
+    return ["-replay", a.replayPath, "-out", a.outName, "-noupdatecheck", "-skip", `-settings=${a.settingsName}`, ...windowArgs(a.window)]
+}
 
 export class DanserRun {
     private proc: ChildProcess | null = null
@@ -68,8 +76,7 @@ export class DanserRun {
         }
 
         return new Promise<DanserOutcome>(resolve => {
-            const danserArguments = ["-replay", a.replayPath, "-out", a.outName, "-noupdatecheck", "-skip", `-settings=${a.settingsName}`]
-            const proc = spawn("./danser-cli", danserArguments, { cwd: a.danserDir, env: a.env, stdio: ["ignore", "pipe", "pipe"] })
+            const proc = spawn("./danser-cli", danserArguments(a), { cwd: a.danserDir, env: a.env, stdio: ["ignore", "pipe", "pipe"] })
             this.proc = proc
 
             const timeout = setTimeout(() => this.abort(21, `render exceeded the ${Math.round(a.timeoutMs / 60000)} minute limit`), a.timeoutMs)

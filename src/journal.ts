@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import { serverFor } from "./fleet"
+import type { RenderWindow } from "./window"
 
 export type RenderStatus = "queued" | "rendering" | "done" | "failed"
 
@@ -20,6 +21,8 @@ export type RenderRecord = {
     resolution: string
     skin: string
     options: RenderOptionValues
+    /** The requested clip in whole seconds of song position; null = the full play. */
+    window: RenderWindow | null
     source: string
     /** The site the job came from ("fishy", "kawata", ...): the shared queue's key. */
     server: string
@@ -33,7 +36,7 @@ export type RenderRecord = {
     slot: number | null
 }
 
-type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5">
+type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5"> & { window?: RenderWindow | null }
 
 type JournalFile = { version: 1; nextRenderID: number; renders: RenderRecord[] }
 
@@ -61,6 +64,8 @@ export class Journal {
         for (const r of renders) {
             // Records written before the shared queue carry no server; read it from source.
             if (!r.server) r.server = serverFor(undefined, r.source ?? "")
+            // Records written before windowed renders carry no window: they were full renders.
+            if (r.window === undefined) r.window = null
             this.byId.set(r.renderID, r)
             if (r.renderID > maxId) maxId = r.renderID
         }
@@ -103,7 +108,8 @@ export class Journal {
             finishedAt: null,
             slot: null,
             date: new Date().toISOString(),
-            ...fields
+            ...fields,
+            window: fields.window ?? null
         }
         this.data.renders.push(record)
         this.byId.set(record.renderID, record)
