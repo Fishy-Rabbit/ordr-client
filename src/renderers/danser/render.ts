@@ -187,6 +187,23 @@ export class DanserRun {
                 settle({ success: false, errorCode: 21, errorMessage: `${why}\n${tailText()}`.trim() })
             }
 
+            let hookFailed = false
+            /**
+             * Call a progress hook (onDrawStart, onProgress: they write the journal) without letting
+             * its failure out of this output handler, where a full disk or an I/O error would be
+             * uncaught and end the whole worker, every server's renders with it. Only the first
+             * failure is logged; the run goes on and settles on danser's own outcome, and the
+             * journal still holds the change in memory for its next write.
+             */
+            const hook = (call: () => void) => {
+                try {
+                    call()
+                } catch (err) {
+                    if (hookFailed) return
+                    hookFailed = true
+                    a.log(`${a.outName}: a progress update could not be recorded (the render goes on): ${(err as Error).message}`)
+                }
+            }
             /**
              * Read one log line: the draw start and progress from stdout, known failure shapes and
              * panics from either stream. Lines arriving after the run settled (from a child danser
@@ -201,18 +218,18 @@ export class DanserRun {
                     // Progress lines before "Starting encoding" belong to the pp pre-pass.
                     if (line.includes("Starting encoding") && !canGetProgress) {
                         canGetProgress = true
-                        a.onDrawStart?.()
+                        hook(() => a.onDrawStart?.())
                     }
                     if (canGetProgress && line.includes("Progress")) {
                         const match = line.match(/(\d+)%/)
                         if (match) {
                             const pct = Number(match[1])
-                            a.onProgress(pct >= 100 ? "Finalizing" : `Rendering (${pct}%)`)
+                            hook(() => a.onProgress(pct >= 100 ? "Finalizing" : `Rendering (${pct}%)`))
                         }
                     }
                     if (line.includes("Finished.")) {
                         finished = true
-                        a.onProgress("Finalizing")
+                        hook(() => a.onProgress("Finalizing"))
                     }
                     if (line.includes("Beatmap not found")) {
                         fail(8, "danser could not match the replay to a difficulty in the downloaded set (the map may have been updated since the play)")

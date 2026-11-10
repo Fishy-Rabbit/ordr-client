@@ -126,6 +126,12 @@ filesystem holding `VIDEOS_DIR` has less free space than that. Jobs already queu
 It exists because the videos share a disk with other data (on the Backup node: the nightly
 backups), and a public site can ask for videos faster than the 30-day sweep removes them.
 
+The floor only gates new renders; it reserves nothing for the ones already admitted. If the disk
+fills anyway, a journal write that fails during a render is logged and the worker keeps running. A
+failed draw-start or progress write leaves the render going; a render already done stays done; any
+other failure marks the render failed (code 21). The journal holds each change in memory and
+writes it with the next write that succeeds.
+
 ### Uploads and child processes
 
 `POST /renders` refuses what it cannot take before it reads the upload: a full queue, a scoped

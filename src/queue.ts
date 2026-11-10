@@ -73,7 +73,11 @@ export class Scheduler {
 
     /**
      * Run one render on one slot (fake or danser). An unexpected throw marks the render failed
-     * (code 21); the slot is then freed and the queue ticked.
+     * (code 21), unless the render is already done: done is final, so a throw that comes after the
+     * video was recorded (its journal write on a full disk) is only logged. If writing the failure
+     * fails too, that is logged and the failure stays in the journal's memory for its next write:
+     * thrown from here it would reach the process's unhandledRejection handler and end the worker.
+     * The slot is then freed and the queue ticked.
      */
     private async launch(slot: number, record: RenderRecord): Promise<void> {
         const entry: Active = { renderID: record.renderID, run: null }
@@ -92,7 +96,16 @@ export class Scheduler {
             }
         } catch (err) {
             this.log(`render ${record.renderID}: worker error ${(err as Error).stack ?? err}`)
-            this.journal.update(record.renderID, { status: "failed", progress: "Failed", errorCode: 21, errorMessage: `worker error: ${(err as Error).message}`, finishedAt: new Date().toISOString() })
+            if (this.journal.get(record.renderID)?.status === "done") {
+                // The journal holds done in memory and writes it with its next successful write.
+                this.log(`render ${record.renderID}: kept as done; the error above came after its video was recorded`)
+            } else {
+                try {
+                    this.journal.update(record.renderID, { status: "failed", progress: "Failed", errorCode: 21, errorMessage: `worker error: ${(err as Error).message}`, finishedAt: new Date().toISOString() })
+                } catch (writeErr) {
+                    this.log(`render ${record.renderID}: could not record the failure: ${(writeErr as Error).message}`)
+                }
+            }
         } finally {
             this.active.delete(slot)
             setImmediate(() => this.tick())

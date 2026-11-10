@@ -58,6 +58,7 @@ test("the retention sweep deletes old videos of done records and of failed recor
     assert.ok(lines.some((l) => /retention sweep removed 2 video/.test(l)), lines.join("\n"))
 })
 
+/** A video the sweep cannot delete must not stop it: that record waits for the next sweep, and the records after it are still swept. */
 test("a video the sweep cannot delete is left for the next sweep, and the sweep goes on", (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "retention-"))
     t.after(() => fs.rmSync(dir, { recursive: true, force: true }))

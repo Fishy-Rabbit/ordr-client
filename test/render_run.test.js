@@ -161,6 +161,31 @@ test("a failed exit still reports code 21 with the exit code and the log tail", 
     assert.equal(outcome.errorMessage, "danser exited with code 3\nsomething went wrong")
 })
 
+/** A journal write that fails inside danser's output handler must not end the worker: the run still settles on danser's own outcome. */
+test("a progress hook that throws (a full disk) does not escape the output handler: the run goes on and settles on its own outcome", async (t) => {
+    const dir = workspace(t)
+    standIn(dir, [
+        "echo '2026/11/10 12:00:00 Starting encoding'",
+        "echo '2026/11/10 12:00:01 Progress: 50%, Speed: 1.00x, ETA: 1m00s'",
+        `: > '${path.join(dir, "out", "render1.mp4")}'`,
+        "echo '2026/11/10 12:01:00 Finished.'",
+        "exit 0",
+    ])
+    const lines = []
+    /** Every journal write fails, as on a full disk. */
+    const full = () => {
+        throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" })
+    }
+    const outcome = await danserRun(dir, {
+        onDrawStart: full,
+        onProgress: full,
+        /** Keep the worker's log lines for the assertion below. */
+        log: (l) => lines.push(l),
+    }).run()
+    assert.deepEqual(outcome, { success: true, videoPath: path.join(dir, "out", "render1.mp4") })
+    assert.equal(lines.filter((l) => l.includes("ENOSPC")).length, 1, `the first failure is logged once: ${lines.join(" | ")}`)
+})
+
 test("the time limit ends danser's whole process group: a child it started does not outlive the run", async (t) => {
     const dir = workspace(t)
     const pidFile = path.join(dir, "child.pid")
