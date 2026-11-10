@@ -55,8 +55,9 @@ test("a windowed render never shows the results screen; a full one keeps what wa
     assert.equal(buildDanserSettings({}, { ...args, options: windowedOptions(asked, null) }).Gameplay.ShowResultsScreen, true)
 })
 
-test("the journal stores a window, defaults it to null, and back-fills old journals", () => {
+test("the journal stores a window, defaults it to null, and back-fills old journals", (t) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "window-journal-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
     const journal = new Journal(dir)
     journal.load()
     const a = journal.create(job({ window: { start: 12, end: 32 } }))
@@ -68,11 +69,10 @@ test("the journal stores a window, defaults it to null, and back-fills old journ
     assert.deepEqual(again.get(a.renderID).window, { start: 12, end: 32 })
 
     const old = fs.mkdtempSync(path.join(os.tmpdir(), "window-old-"))
+    t.after(() => fs.rmSync(old, { recursive: true, force: true }))
     const record = Object.assign(job({ source: "kawata.pw" }), { renderID: 1, status: "done", progress: "Done", queuePosition: 0, videoFile: null, errorCode: 0, errorMessage: "", removed: false, startedAt: null, finishedAt: null, slot: null, date: "2026-10-01T00:00:00Z" })
     fs.writeFileSync(path.join(old, "renders.json"), JSON.stringify({ version: 1, nextRenderID: 2, renders: [record] }))
     const loaded = new Journal(old)
     loaded.load()
     assert.equal(loaded.get(1).window, null)
-    fs.rmSync(dir, { recursive: true, force: true })
-    fs.rmSync(old, { recursive: true, force: true })
 })

@@ -28,8 +28,6 @@ folder, and `danser` is the built-in under its own name. Missing elements fall
 back to the built-in; the default is resolved per request, so a folder that lands
 while the worker runs becomes live without a restart.
 
-## API
-
 ## Map source: the hinai mirror, and nothing else
 
 This worker fetches beatmaps from ONE place: the hinai beatmap mirror
@@ -41,6 +39,8 @@ the process refuses to start when `MIRROR_BASE` is not a hinai mirror host
 redirects are followed only when they stay on a hinai mirror host, so a mirror
 running in redirect mode can never hand this worker a third-party URL. If the
 hinai mirror does not have a set, the render fails with code 8.
+
+## API
 
 Every route except `GET /health` requires the header `X-Render-Key`, carrying either the staff
 key (`RENDER_API_KEY`) or a scoped key (`RENDER_SCOPED_KEYS`, see "Scoped keys" below).
@@ -56,10 +56,18 @@ key (`RENDER_API_KEY`) or a scoped key (`RENDER_SCOPED_KEYS`, see "Scoped keys" 
 
 Error codes reuse o!rdr's numbers where the meaning matches: 2 replay unparseable,
 5 replay corrupted or oversized, 6 not osu!standard, 7 no input data, 8 map not
-available on the mirror (also: the replay's difficulty is not in the set), 11
-autoplay, 12 invalid request field, 21 danser failed (the message carries the log
-tail), 26 incompatible mods, 29 the same `scoreId` from the same server is already
-queued or rendering, 40 queue full.
+available on the mirror (also: the replay's difficulty is not in the set, or the set
+is larger than `RENDER_MAX_OSZ_MB` or holds an implausibly large difficulty file), 11
+autoplay, 12 invalid request field (also: an upload the client abandoned midway), 21
+danser failed (the message carries the log tail; also, with HTTP 500, a replay the
+worker could not store), 26 incompatible mods, 29 the same `scoreId` from the same
+server is already queued or rendering, 40 queue full, 43 low on disk (see "Free-disk
+floor").
+
+Answers that are not about a render carry their HTTP status as the code: 401 a
+missing or invalid `X-Render-Key`, 403 a scoped key naming another server, 404 an
+unknown route or a video the key may not see, 500 an unexpected internal error (sent
+only while nothing of the answer has gone out yet; otherwise the answer just stops).
 
 ### One queue for every site
 
@@ -121,11 +129,13 @@ backups), and a public site can ask for videos faster than the 30-day sweep remo
 ### Map cache
 
 `SONGS_DIR` keeps one `<setId>.osz` per set, fetched from the mirror the first time it is
-rendered. The sweep that removes old videos (at boot, then daily) also deletes sets nobody used
-for `RENDER_SONG_CACHE_DAYS`. A set is kept while its file was used inside the window (a cache
-hit refreshes its mtime), while a render in the journal asked for it inside the window, or while
-a render for it is still queued or rendering. Leftover `.osz.part` downloads older than a day go
-too. A deleted set costs one download from the mirror the next time it is rendered.
+rendered. Renders that need the same uncached set at the same time share one download, and a
+set over `RENDER_MAX_OSZ_MB` is never stored. The sweep that removes old videos (at boot, then
+daily) also deletes sets nobody used for `RENDER_SONG_CACHE_DAYS`. A set is kept while its file
+was used inside the window (a cache hit refreshes its mtime), while a render in the journal
+asked for it inside the window, or while a render for it is still queued or rendering. Leftover
+`.osz.part` downloads older than a day go too. A deleted set costs one download from the mirror
+the next time it is rendered.
 
 ### Windowed renders (`start`, `end`)
 
@@ -154,7 +164,7 @@ an active render from the same server answers code 29.
 | `RENDER_SCOPED_KEYS` | unset | `server=<sha256 hex of the key>` entries, separated by commas or spaces: keys that act for one server only (see "Scoped keys"). A malformed entry refuses the boot. |
 | `RENDER_SCOPED_MAX_ACTIVE` | `10` | Most queued + rendering jobs one scoped key's server may hold. |
 | `RENDER_MIN_FREE_GB` | `0` (off) | Refuse new renders (503 / code 43) while `VIDEOS_DIR`'s filesystem has less free space than this. |
-| `PORT` | `3002` | |
+| `PORT` | `3002` | The listen port. The image's health check probes the same port. |
 | `RENDER_CONCURRENCY` | `2` | Render slots; each gets its own Xvfb display (`:10`, `:11`, ...) and working dir. |
 | `RENDER_THREADS_PER_SLOT` | `4` | `LP_NUM_THREADS` for llvmpipe in each slot. |
 | `RENDER_TIMEOUT_MIN` | `90` | A render past this is killed and marked failed (code 21). |
@@ -163,12 +173,16 @@ an active render from the same server answers code 29.
 | `RENDER_SONG_CACHE_DAYS` | `30` | Cached `.osz` sets nobody used for this long are deleted by the same sweep (see "Map cache"). |
 | `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
 | `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |
+| `RENDER_MAX_OSZ_MB` | `256` | Largest map set (`.osz`) a render may use. A bigger download is cut off and a bigger cached file is not opened; the render fails with code 8. osu! itself refuses uploads over 100 MB, but a few older sets are larger. |
 | `MIRROR_BASE` | `http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100` | The beatmap mirror. |
 | `MIRROR_DOWNLOAD_PATH` | `/api/v1/hinai/d/{id}` | Appended to `MIRROR_BASE` with `{id}` = beatmapsetId; must answer the `.osz` bytes (a JSON resolver answer fails the render with code 8). |
 | `MIRROR_USER_AGENT` | `ordr-render/1.0 (+https://fishy.moe)` | |
 | `VIDEOS_DIR`, `SONGS_DIR`, `SKINS_DIR`, `STATE_DIR`, `WORK_DIR` | `./data/...`, `./work` (image: `/data/...`, `/work`) | Finished videos; the `.osz` cache; skins; the journal (`renders.json`) and pending replays; per-slot scratch. |
+| `REPLAYS_DIR` | `STATE_DIR/replays` | Uploaded replays waiting for their render, one `<renderID>.osr` each; a replay is deleted when its render ends, done or failed. |
 | `RENDER_DEFAULT_SKIN` | unset | A folder name under `SKINS_DIR` that the wire value `default` (and an omitted `skin`) resolves to; unset = danser's built-in. A missing folder is a boot warning, not a refusal, and `default` renders with the built-in until it exists. |
 | `DANSER_DIR` | `./bins/danser` (image: `/app/bins/danser`) | Where `danser-cli` lives; copied per slot at boot. |
+| `DANSER_VERSION` | `unknown` (image: the `DANSER_VERSION` build argument, `0.11.0`) | Reported as `danserVersion` by `GET /health` and in the boot log line. A label only: the danser that runs is whatever `DANSER_DIR` holds. |
+| `XVFB_DISPLAY_BASE` | `10` | Slot N (from 0) uses X display `:<base + N>`. Rounded down to a whole number. |
 | `RENDER_FAKE` | unset | `1`: no Xvfb/danser; a render walks to done in ~10 s with a 1-second black MP4 (ffmpeg). |
 | `RENDER_DEBUG` | unset | `1`: log every danser line. |
 

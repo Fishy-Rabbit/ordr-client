@@ -53,9 +53,10 @@ function osr(frames, mods = 0) {
     ])
 }
 
-/** A journal in a fresh temp directory. */
-function freshJournal() {
+/** A journal in a fresh temp directory, removed when the test `t` ends. */
+function freshJournal(t) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "playlen-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
     const journal = new Journal(dir)
     journal.load()
     return { journal, dir }
@@ -78,6 +79,73 @@ test("framesEndMs refuses totals no real play reaches (over 3 hours of song time
     assert.equal(framesEndMs("10000000|1|1|0"), 10000000, "2.8 hours is long but possible")
     assert.equal(framesEndMs("Infinity|1|1|0,10|1|1|0"), 10, "a non-finite delta is skipped")
     assert.equal(framesEndMs("10|1|1,20|1|1|0"), 20, "a frame needs four fields")
+})
+
+/**
+ * framesEndMs as it was before the delta was read in place: every delta cut out of the text and
+ * read by Number(). The in-place reading must give exactly the same answers.
+ */
+function framesEndMsByNumber(text) {
+    if (!text) return null
+    let sum = 0
+    let end = 0
+    let counted = 0
+    let frameStart = 0
+    let firstBar = -1
+    let bars = 0
+    for (let k = 0; k <= text.length; k++) {
+        const c = k < text.length ? text.charCodeAt(k) : 44
+        if (c === 124) {
+            if (bars === 0) firstBar = k
+            bars++
+        } else if (c === 44) {
+            if (bars >= 3) {
+                const w = Number(text.slice(frameStart, firstBar))
+                if (Number.isFinite(w) && w !== -12345) {
+                    sum += w
+                    counted++
+                    if (sum > end) end = sum
+                }
+            }
+            frameStart = k + 1
+            firstBar = -1
+            bars = 0
+        }
+    }
+    if (counted === 0 || end <= 0 || end > 3 * 3600 * 1000) return null
+    return end
+}
+
+test("framesEndMs reads every delta exactly as Number() does, odd spellings included", () => {
+    const odd = ["16", "-16", "0", "-0", "007", "", "-", "+5", "1.5", "1e3", "0x10", "0b11", " 16", "16 ", "\t8", "Infinity", "-Infinity", "NaN", "abc", "--5", "5-", ".5", "5.", "1_000",
+        "999999999999999", "-999999999999999", "9999999999999999", "123456789012345678901234", "-12345", "-012345", "12345"]
+    for (const a of odd) {
+        for (const b of odd) {
+            const text = `${a}|1|2|0,${b}|3|4|0,10|1|1|0`
+            assert.equal(framesEndMs(text), framesEndMsByNumber(text), JSON.stringify(text))
+        }
+    }
+    let seed = 20261110
+    /** A deterministic pseudo-random integer in [0, n). */
+    const rand = (n) => {
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0
+        return (seed >>> 16) % n
+    }
+    for (let i = 0; i < 5000; i++) {
+        const frames = []
+        for (let f = rand(12); f >= 0; f--) {
+            const delta = rand(4) === 0 ? odd[rand(odd.length)] : String(rand(40) - 5)
+            frames.push([delta, ...Array(rand(6) === 0 ? 2 : 3).fill("1")].join("|"))
+        }
+        const text = frames.join(rand(10) === 0 ? ",," : ",")
+        assert.equal(framesEndMs(text), framesEndMsByNumber(text), JSON.stringify(text))
+    }
+})
+
+test("framesEndMs and the Number() reading agree on the fixture's frames", { skip: !HAS_XZ && "xz is not installed here" }, async () => {
+    const text = await decompressFrames(FIXTURE)
+    assert.equal(framesEndMs(text), framesEndMsByNumber(text))
+    assert.equal(framesEndMs(text), 30000)
 })
 
 test("framesEndMs stays linear on hostile text (many frames with no '|', or '|' with no ',')", () => {
@@ -137,8 +205,8 @@ test("replayPlaySeconds reads a whole .osr: header, frame block, mods, window", 
     assert.equal(await replayPlaySeconds(buf, header, { start: 10, end: 20 }), 10)
 })
 
-test("a queued job's estimate comes from its play length; jobs without one keep the median", () => {
-    const { journal } = freshJournal()
+test("a queued job's estimate comes from its play length; jobs without one keep the median", (t) => {
+    const { journal } = freshJournal(t)
     const long = journal.create(job({ playSeconds: 262 }))
     const plain = journal.create(job({}))
     const model = renderModel(journal)
@@ -151,8 +219,8 @@ test("a queued job's estimate comes from its play length; jobs without one keep 
     assert.equal(etaBasisFor(journal.get(plain.renderID), model, TYPICAL), "measured")
 })
 
-test("a running job before danser's first report counts its own expected length down", () => {
-    const { journal } = freshJournal()
+test("a running job before danser's first report counts its own expected length down", (t) => {
+    const { journal } = freshJournal(t)
     const now = Date.parse("2026-11-10T15:00:00Z")
     const r = journal.create(job({ playSeconds: 262 }))
     journal.update(r.renderID, { status: "rendering", progress: "Rendering (preparing)", startedAt: new Date(now - 20_000).toISOString() })
@@ -161,8 +229,8 @@ test("a running job before danser's first report counts its own expected length 
     assert.equal(etaByRender(journal, 1, TYPICAL, now, model).get(r.renderID), total - 20)
 })
 
-test("the model is measured once three finished renders recorded their play length and draw start", () => {
-    const { journal } = freshJournal()
+test("the model is measured once three finished renders recorded their play length and draw start", (t) => {
+    const { journal } = freshJournal(t)
     const t0 = Date.parse("2026-11-10T12:00:00Z")
     for (const [play, prep, draw] of [[100, 6, 130], [200, 8, 250], [50, 12, 60]]) {
         const r = journal.create(job({ playSeconds: play }))
@@ -177,8 +245,8 @@ test("the model is measured once three finished renders recorded their play leng
     assert.deepEqual(renderModel(journal), { prepSeconds: 8, drawPerPlaySecond: 1.25, basis: "measured" })
 })
 
-test("POST /renders records the play length the replay's frames give", { skip: !HAS_XZ && "xz is not installed here" }, async () => {
-    const { journal, dir } = freshJournal()
+test("POST /renders records the play length the replay's frames give", { skip: !HAS_XZ && "xz is not installed here" }, async (t) => {
+    const { journal, dir } = freshJournal(t)
     const cfg = {
         fake: false, apiKey: "k3y", scopedKeys: [], scopedMaxActive: 10, minFreeBytes: 0, videosDir: dir, maxQueue: 20,
         maxReplayBytes: 1 << 20, skinsDir: dir, defaultSkin: "", replaysDir: dir, danserVersion: "test",
@@ -208,6 +276,5 @@ test("POST /renders records the play length the replay's frames give", { skip: !
         assert.equal(journal.all()[0].playSeconds, 30)
     } finally {
         server.close()
-        fs.rmSync(dir, { recursive: true, force: true })
     }
 })

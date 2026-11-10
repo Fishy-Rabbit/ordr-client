@@ -1,7 +1,7 @@
 import fs from "fs"
 import path from "path"
 import crypto from "crypto"
-import { Readable } from "stream"
+import { Readable, Transform } from "stream"
 import { pipeline } from "stream/promises"
 import { spawn } from "child_process"
 import AdmZip from "adm-zip"
@@ -61,6 +61,8 @@ export function prepareSlotDirs(cfg: Config, index: number, display: string): Sl
  * Let danser write its own defaults file once (`-settings=template`), so the
  * per-render document is a patch over a complete, version-correct base. If
  * danser never writes it, the patch alone is used and danser fills the rest.
+ * A danser that cannot even start (an `error` event: EACCES, a missing loader)
+ * ends the wait the same way instead of crashing the worker as an unhandled error.
  */
 export async function generateSettingsTemplate(cfg: Config, slot: SlotPaths, log: (line: string) => void): Promise<Json> {
     const file = path.join(slot.danserDir, "settings", "template.json")
@@ -71,6 +73,10 @@ export async function generateSettingsTemplate(cfg: Config, slot: SlotPaths, log
     proc.stderr?.on("data", (d: Buffer) => (tail = (tail + d.toString()).slice(-1500)))
     let exited = false
     proc.on("exit", () => (exited = true))
+    proc.on("error", err => {
+        tail = (tail + `\nspawn error: ${err.message}`).slice(-1500)
+        exited = true
+    })
     const deadline = Date.now() + 60_000
     while (Date.now() < deadline) {
         if (fs.existsSync(file) && fs.statSync(file).size > 0) break
@@ -160,16 +166,46 @@ async function fetchFromMirror(cfg: Config, url: string): Promise<Response> {
 /** ensureOsz's answer: the path of the cached .osz, or why the map is not available. */
 type OszResult = { ok: true; path: string } | { ok: false; message: string }
 
+/** A set refused for its size (RENDER_MAX_OSZ_MB or the difficulty-file caps); the render fails with code 8. */
+export class OszLimitError extends Error {}
+
+/** A byte count for refusal messages: megabytes to one decimal from 1 MB up, plain bytes below. */
+const sizeText = (bytes: number) => (bytes >= 1048576 ? `${Number((bytes / 1048576).toFixed(1))} MB` : `${bytes} bytes`)
+
+/** Downloads in progress, by set id: a second render of a set that is downloading waits for that download. */
+const oszDownloads = new Map<number, Promise<OszResult>>()
+
 /**
  * The .osz for a set, from the songs cache or fetched from the mirror by set id. A cache hit
  * refreshes the file's mtime, the "last used" clock the daily cache sweep reads (songcache.ts).
+ * Two slots can ask for the same uncached set at once: they share one download, so only one ever
+ * writes `<setId>.osz.part`. Different sets download independently. Everything up to registering
+ * the download runs before the first await, so a second call in the same tick already sees it.
  */
 export async function ensureOsz(cfg: Config, setId: number, log: (line: string) => void): Promise<OszResult> {
+    const pending = oszDownloads.get(setId)
+    if (pending) {
+        log(`set ${setId} is already downloading for another render; waiting for that download`)
+        return pending
+    }
     const dest = path.join(cfg.songsDir, `${setId}.osz`)
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+    const cached = fs.statSync(dest, { throwIfNoEntry: false })
+    if (cached && cached.size > 0) {
         touchSong(dest)
         return { ok: true, path: dest }
     }
+    const download = downloadOsz(cfg, setId, dest, log).finally(() => oszDownloads.delete(setId))
+    oszDownloads.set(setId, download)
+    return download
+}
+
+/**
+ * Download a set from the mirror into `<dest>.part`, check the zip magic, then rename it to `dest`.
+ * The body is counted while it streams: past cfg.maxOszBytes (RENDER_MAX_OSZ_MB) the download is
+ * cut off and the part file deleted, as it is when the mirror's Content-Length already says the set
+ * is too large. Only ensureOsz calls this, at most once per set at a time.
+ */
+async function downloadOsz(cfg: Config, setId: number, dest: string, log: (line: string) => void): Promise<OszResult> {
     const url = `${cfg.mirrorBase}${cfg.mirrorDownloadPath.replace("{id}", String(setId))}`
     log(`fetching set ${setId} from the mirror`)
     let res: Response
@@ -180,9 +216,23 @@ export async function ensureOsz(cfg: Config, setId: number, log: (line: string) 
     }
     if (res.status === 404) return { ok: false, message: `map not available on the mirror (set ${setId} answered 404)` }
     if (!res.ok || !res.body) return { ok: false, message: `map not available on the mirror (set ${setId} answered HTTP ${res.status})` }
+    const tooLarge = `map not available on the mirror: set ${setId} is larger than the RENDER_MAX_OSZ_MB limit (${sizeText(cfg.maxOszBytes)})`
+    if (Number(res.headers.get("content-length")) > cfg.maxOszBytes) {
+        await res.body.cancel().catch(() => undefined)
+        return { ok: false, message: tooLarge }
+    }
+    let received = 0
+    const capped = new Transform({
+        /** Pass each chunk through until more than maxOszBytes have arrived, then fail the download. */
+        transform(chunk: Buffer, _encoding, done) {
+            received += chunk.length
+            if (received > cfg.maxOszBytes) done(new OszLimitError(tooLarge))
+            else done(null, chunk)
+        }
+    })
     const tmp = `${dest}.part`
     try {
-        await pipeline(Readable.fromWeb(res.body as unknown as import("stream/web").ReadableStream), fs.createWriteStream(tmp))
+        await pipeline(Readable.fromWeb(res.body as unknown as import("stream/web").ReadableStream), capped, fs.createWriteStream(tmp))
         const fd = fs.openSync(tmp, "r")
         const head = Buffer.alloc(2)
         fs.readSync(fd, head, 0, 2, 0)
@@ -194,21 +244,48 @@ export async function ensureOsz(cfg: Config, setId: number, log: (line: string) 
         fs.renameSync(tmp, dest)
     } catch (err) {
         fs.rmSync(tmp, { force: true })
+        if (err instanceof OszLimitError) return { ok: false, message: err.message }
         return { ok: false, message: `map not available on the mirror: download failed (${(err as Error).message})` }
     }
     return { ok: true, path: dest }
 }
 
 /** Whether the replay's difficulty is in the set, and the title to show for it. */
-type DiffInfo = { found: boolean; title: string }
+export type DiffInfo = { found: boolean; title: string }
 
-/** Find the difficulty the replay was played on and name it "Artist - Title [Version]". */
-function inspectOsz(oszPath: string, beatmapMd5: string | null): DiffInfo {
+/** The size caps inspectOsz applies: the .osz file, one difficulty file, and a set's difficulty files together. */
+export type OszLimits = { oszBytes: number; osuBytes: number; setOsuBytes: number }
+
+/**
+ * The difficulty-file caps. Real .osu files are small (32 KB at the median; the largest of about a
+ * million is 35 MB); the per-set total keeps a set of many large ones from holding the worker in
+ * inflate for long.
+ */
+export const OSU_FILE_LIMITS = { osuBytes: 64 * 1024 * 1024, setOsuBytes: 512 * 1024 * 1024 }
+
+/**
+ * Find the difficulty the replay was played on and name it "Artist - Title [Version]". The set is
+ * untrusted, so its sizes are checked before anything is read into memory: an .osz over
+ * limits.oszBytes is refused unread, and so is a difficulty file whose declared size is over
+ * limits.osuBytes or takes the set's total over limits.setOsuBytes. adm-zip (0.5.18) allocates the
+ * declared size and inflates with it as zlib's maxOutputLength, so capping the declared size caps
+ * the memory; a declared size of 0 is the exception (adm-zip then inflates with no output limit),
+ * so such an entry is taken for the empty file it claims to be and never inflated. Size refusals
+ * throw OszLimitError; a damaged archive throws adm-zip's own error.
+ */
+export function inspectOsz(oszPath: string, beatmapMd5: string | null, limits: OszLimits): DiffInfo {
+    const size = fs.statSync(oszPath).size
+    if (size > limits.oszBytes) throw new OszLimitError(`the set's .osz is ${sizeText(size)}, larger than the RENDER_MAX_OSZ_MB limit (${sizeText(limits.oszBytes)})`)
     const zip = new AdmZip(oszPath)
     let fallbackTitle = ""
+    let declaredTotal = 0
     for (const entry of zip.getEntries()) {
         if (entry.isDirectory || !entry.entryName.toLowerCase().endsWith(".osu")) continue
-        const data = entry.getData()
+        const declared = entry.header.size
+        if (declared > limits.osuBytes) throw new OszLimitError(`a difficulty file in the set declares ${sizeText(declared)}, more than the ${sizeText(limits.osuBytes)} one may have`)
+        declaredTotal += declared
+        if (declaredTotal > limits.setOsuBytes) throw new OszLimitError(`the set's difficulty files declare more than ${sizeText(limits.setOsuBytes)} together`)
+        const data = declared === 0 ? Buffer.alloc(0) : entry.getData()
         const md5 = crypto.createHash("md5").update(data).digest("hex")
         const text = data.toString("utf8", 0, Math.min(data.length, 16384))
         /** The value of the first `<key>:` line in the difficulty file's first 16 KiB, or an empty string. */
@@ -245,7 +322,9 @@ function moveFile(from: string, to: string): void {
 
 /**
  * Render one queued record on one slot, end to end. Never throws for a render
- * failure: the record is marked failed with a code and the log tail.
+ * failure: the record is marked failed with a code and the log tail. A map set
+ * refused for its size or unreadable fails with code 8 and is not kept. A
+ * finished render is recorded done before its replay is deleted.
  */
 export async function runRenderJob(cfg: Config, journal: Journal, record: RenderRecord, slot: SlotPaths, template: Json, log: (line: string) => void, register: (run: DanserRun | null) => void): Promise<void> {
     const id = record.renderID
@@ -268,10 +347,11 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
 
     let diff: DiffInfo
     try {
-        diff = inspectOsz(osz.path, record.beatmapMd5)
+        diff = inspectOsz(osz.path, record.beatmapMd5, { oszBytes: cfg.maxOszBytes, ...OSU_FILE_LIMITS })
     } catch (err) {
         fs.rmSync(osz.path, { force: true })
-        return finishFail(8, `map not available on the mirror: the cached .osz is unreadable (${(err as Error).message})`)
+        const why = err instanceof OszLimitError ? err.message : `the cached .osz is unreadable (${(err as Error).message})`
+        return finishFail(8, `map not available on the mirror: ${why}`)
     }
     if (!diff.found) return finishFail(8, `the set on the mirror has no difficulty with md5 ${record.beatmapMd5}; the map was probably updated after this play`)
     if (diff.title && diff.title !== record.mapTitle) journal.update(id, { mapTitle: diff.title })
@@ -329,9 +409,17 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
     } catch (err) {
         return finishFail(21, `could not move the finished video into the videos volume: ${(err as Error).message}`)
     }
-    fs.rmSync(osr, { force: true })
-    cleanSlot(slot)
+    // Done is recorded before the replay goes: a crash in between leaves a stray replay file,
+    // never a "rendering" record without its replay, which the next boot would re-queue and fail
+    // with code 5 while the finished video sat outside the retention sweep. Nothing after this
+    // line may turn the render into a failure, so the cleanup only logs.
     journal.update(id, { status: "done", progress: "Done", videoFile: finalPath, finishedAt: new Date().toISOString() })
+    try {
+        fs.rmSync(osr, { force: true })
+        cleanSlot(slot)
+    } catch (err) {
+        log(`render ${id}: cleanup after the render failed: ${(err as Error).message}`)
+    }
     const seconds = record.startedAt ? Math.round((Date.now() - Date.parse(record.startedAt)) / 1000) : 0
-    log(`render ${id} done in ${seconds}s -> ${finalPath} (${fs.statSync(finalPath).size} bytes)`)
+    log(`render ${id} done in ${seconds}s -> ${finalPath} (${fs.statSync(finalPath, { throwIfNoEntry: false })?.size ?? 0} bytes)`)
 }

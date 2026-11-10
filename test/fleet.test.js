@@ -10,9 +10,10 @@ const { serverFor, typicalDuration, etaByRender, serverCounts, FALLBACK_RENDER_S
 const { Journal } = require("../build/journal")
 const { createServer } = require("../build/server")
 
-/** A journal in a fresh temp directory. */
-function freshJournal(seed) {
+/** A journal in a fresh temp directory, removed when the test `t` ends. */
+function freshJournal(t, seed) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fleet-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
     if (seed) fs.writeFileSync(path.join(dir, "renders.json"), JSON.stringify(seed))
     const journal = new Journal(dir)
     journal.load()
@@ -33,15 +34,15 @@ test("serverFor: an explicit name wins, otherwise the source names the site", ()
     assert.equal(serverFor(undefined, ""), "other")
 })
 
-test("the duplicate check is per server: the same score id from two servers is two jobs", () => {
-    const journal = freshJournal()
+test("the duplicate check is per server: the same score id from two servers is two jobs", (t) => {
+    const journal = freshJournal(t)
     journal.create(job({ server: "fishy", scoreId: "1234" }))
     assert.ok(journal.findActiveByScore("fishy", "1234"))
     assert.equal(journal.findActiveByScore("kawata", "1234"), undefined)
 })
 
-test("records written before the shared queue get their server from source", () => {
-    const journal = freshJournal({
+test("records written before the shared queue get their server from source", (t) => {
+    const journal = freshJournal(t, {
         version: 1,
         nextRenderID: 3,
         renders: [
@@ -53,8 +54,8 @@ test("records written before the shared queue get their server from source", () 
     assert.equal(journal.get(2).server, "fishy")
 })
 
-test("typical duration: assumed until a render finishes, then the median of finished ones", () => {
-    const journal = freshJournal()
+test("typical duration: assumed until a render finishes, then the median of finished ones", (t) => {
+    const journal = freshJournal(t)
     assert.deepEqual(typicalDuration(journal), { seconds: FALLBACK_RENDER_SECONDS, basis: "assumed" })
     for (const seconds of [100, 300, 200]) {
         const r = journal.create(job({}))
@@ -63,8 +64,8 @@ test("typical duration: assumed until a render finishes, then the median of fini
     assert.deepEqual(typicalDuration(journal), { seconds: 200, basis: "measured" })
 })
 
-test("ETA simulates the slots across both servers: running jobs first, then FIFO", () => {
-    const journal = freshJournal()
+test("ETA simulates the slots across both servers: running jobs first, then FIFO", (t) => {
+    const journal = freshJournal(t)
     const typical = { seconds: 200, basis: "measured" }
     const running = journal.create(job({ server: "fishy" }))
     journal.update(running.renderID, { status: "rendering", progress: "Rendering (50%)", startedAt: new Date().toISOString() })
@@ -78,8 +79,8 @@ test("ETA simulates the slots across both servers: running jobs first, then FIFO
     assert.equal(eta.get(c.renderID), 400, "then the slot freed by the first queued job")
 })
 
-test("serverCounts names only servers with active jobs", () => {
-    const journal = freshJournal()
+test("serverCounts names only servers with active jobs", (t) => {
+    const journal = freshJournal(t)
     journal.create(job({ server: "fishy" }))
     const r = journal.create(job({ server: "kawata" }))
     journal.update(r.renderID, { status: "rendering" })
@@ -116,8 +117,8 @@ function getJson(url, headers) {
     })
 }
 
-test("GET /health shares the per-server load and typical length; GET /queue lists both servers for staff", async () => {
-    const journal = freshJournal()
+test("GET /health shares the per-server load and typical length; GET /queue lists both servers for staff", async (t) => {
+    const journal = freshJournal(t)
     const r1 = journal.create(job({ server: "fishy", replayUsername: "fish" }))
     journal.update(r1.renderID, { status: "rendering", progress: "Rendering (25%)", startedAt: new Date().toISOString() })
     journal.create(job({ server: "kawata", replayUsername: "kawa", scoreId: "9" }))

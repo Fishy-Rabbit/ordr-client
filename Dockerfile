@@ -14,12 +14,19 @@ ARG DANSER_VERSION=0.11.0
 ARG DANSER_SHA256=c3184ceb84b20e8e9c9a2709113efc29b8bdf2f866949834d7fb8e799618a67e
 ENV DEBIAN_FRONTEND=noninteractive
 # xz-utils: decompresses a submitted replay's LZMA frame block to read its play length
-# (src/playlength.ts); bookworm's 5.4.1 predates the 2024 backdoored 5.6.x releases.
+# (src/playlength.ts); bookworm's 5.4.1 predates the 2024 backdoored 5.6.x releases. The
+# base tag floats, so the build checks what it got: `xz --version` names both the tool and
+# the liblzma it loaded, and 5.6.0 or 5.6.1 (CVE-2024-3094) on either line fails the build.
+# Written without a pipe, so a failing step cannot be hidden behind a later one.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb xauth xfonts-base x11-xserver-utils \
         libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 \
         libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libasound2 libgtk-3-0 \
         fonts-dejavu fonts-noto-cjk ca-certificates curl unzip ffmpeg xz-utils \
+    && xz --version > /tmp/xz-version \
+    && cat /tmp/xz-version \
+    && if grep -Eq ' 5\.6\.[01]$' /tmp/xz-version; then echo "refusing to build: xz/liblzma 5.6.0 and 5.6.1 carry the CVE-2024-3094 backdoor" >&2; exit 1; fi \
+    && rm -f /tmp/xz-version \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # danser-go is fetched ONCE, here, and pinned by hash; the worker never downloads anything at runtime.
@@ -49,5 +56,7 @@ ENV PORT=3002 \
     NODE_ENV=production
 USER 1001
 EXPOSE 3002
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s CMD curl -fsS http://127.0.0.1:3002/health || exit 1
+# Shell form on purpose: sh expands PORT when the check runs, so a container started with
+# another PORT is probed where the worker listens (unset or empty means 3002, as in loadConfig).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s CMD curl -fsS "http://127.0.0.1:${PORT:-3002}/health" || exit 1
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

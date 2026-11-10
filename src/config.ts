@@ -44,6 +44,8 @@ export type Config = {
     songCacheDays: number
     maxQueue: number
     maxReplayBytes: number
+    /** A map set (.osz) larger than this is refused (code 8): its download is cut off, a cached copy is not read. */
+    maxOszBytes: number
     mirrorBase: string
     mirrorDownloadPath: string
     mirrorUserAgent: string
@@ -162,6 +164,9 @@ export function loadConfig(): Config {
         songCacheDays: Math.max(1, num("RENDER_SONG_CACHE_DAYS", 30)),
         maxQueue: Math.max(1, Math.floor(num("RENDER_MAX_QUEUE", 20))),
         maxReplayBytes: Math.max(1, num("RENDER_MAX_REPLAY_MB", 16)) * 1024 * 1024,
+        // osu! refuses uploads over 100 MB; a few older sets are larger (151 MB without
+        // video was the biggest of ~67,000 archived ones), so the default leaves room.
+        maxOszBytes: Math.max(1, num("RENDER_MAX_OSZ_MB", 256)) * 1024 * 1024,
         mirrorBase: str("MIRROR_BASE", "http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100").replace(/\/+$/, ""),
         // The route that STREAMS the .osz. On the hinai mirror that is the
         // CheeseGull-compatible /api/v1/hinai/d/{id}; its /d/{id} is a cascade

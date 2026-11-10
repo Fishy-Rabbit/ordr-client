@@ -141,8 +141,9 @@ reviews:
           once and never waits).
         - Every failure yields null and never throws: a submission must not fail because its
           length is unknown.
-        - framesEndMs stays one linear pass with no per-frame allocation; MAX_SONG_MS bounds
-          the result.
+        - framesEndMs stays one linear pass. A well-formed frame (a plain integer delta) is read
+          in place and allocates nothing; a delta spelled any other way is cut out and read with
+          Number(), so its meaning never changes. MAX_SONG_MS bounds the result.
 
     - path: "src/renderers/danser/**"
       instructions: |

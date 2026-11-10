@@ -23,9 +23,10 @@ const DRAW_START = Date.parse("2026-11-10T14:38:38Z")
 const TICK_20 = Date.parse("2026-11-10T14:39:37Z")
 const TYPICAL = { seconds: 42, basis: "measured" }
 
-/** A journal in a fresh temp directory; `seed` is written as renders.json first. */
-function freshJournal(seed) {
+/** A journal in a fresh temp directory, removed when the test `t` ends; `seed` is written as renders.json first. */
+function freshJournal(t, seed) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
     if (seed) fs.writeFileSync(path.join(dir, "renders.json"), JSON.stringify(seed))
     const journal = new Journal(dir)
     journal.load()
@@ -44,8 +45,8 @@ function drawing(journal, pct, drawMs, tickMs) {
     return journal.get(r.renderID)
 }
 
-test("a long render's time left comes from its own drawing speed, not the median length", () => {
-    const journal = freshJournal()
+test("a long render's time left comes from its own drawing speed, not the median length", (t) => {
+    const journal = freshJournal(t)
     const r = drawing(journal, 20, DRAW_START, TICK_20)
     // 59 s to draw 20%, so 236 s for the other 80%, plus the finalize step.
     const want = 59 * 4 + FINALIZE_SECONDS
@@ -55,8 +56,8 @@ test("a long render's time left comes from its own drawing speed, not the median
     assert.ok(Math.abs(want - 252) < 20, `${want} should be near the real 252 s`)
 })
 
-test("between two danser reports the estimate counts down with the clock", () => {
-    const journal = freshJournal()
+test("between two danser reports the estimate counts down with the clock", (t) => {
+    const journal = freshJournal(t)
     const r = drawing(journal, 20, DRAW_START, TICK_20)
     const atTick = etaByRender(journal, 1, TYPICAL, TICK_20).get(r.renderID)
     assert.equal(etaByRender(journal, 1, TYPICAL, TICK_20 + 10_000).get(r.renderID), atTick - 10)
@@ -64,16 +65,16 @@ test("between two danser reports the estimate counts down with the clock", () =>
     assert.equal(etaByRender(journal, 1, TYPICAL, TICK_20 + 3_600_000).get(r.renderID), 5)
 })
 
-test("a job queued behind a long render waits for that render's own estimate", () => {
-    const journal = freshJournal()
+test("a job queued behind a long render waits for that render's own estimate", (t) => {
+    const journal = freshJournal(t)
     const running = drawing(journal, 20, DRAW_START, TICK_20)
     const queued = journal.create(job({}))
     const eta = etaByRender(journal, 1, TYPICAL, TICK_20)
     assert.equal(eta.get(queued.renderID), eta.get(running.renderID) + TYPICAL.seconds)
 })
 
-test("without a usable percentage the median estimate still applies", () => {
-    const journal = freshJournal()
+test("without a usable percentage the median estimate still applies", (t) => {
+    const journal = freshJournal(t)
     // Under 5%: too little drawn to trust the speed yet (danser reports every 5%).
     const early = drawing(journal, 0, DRAW_START, DRAW_START)
     assert.equal(projectedSecondsLeft(early, DRAW_START + 1000), null)
@@ -87,8 +88,8 @@ test("without a usable percentage the median estimate still applies", () => {
     assert.equal(projectedSecondsLeft(fin, TICK_20), null)
 })
 
-test("journal.progress stamps progressAt only when the percentage changes", () => {
-    const journal = freshJournal()
+test("journal.progress stamps progressAt only when the percentage changes", (t) => {
+    const journal = freshJournal(t)
     const r = journal.create(job({}))
     assert.equal(r.progressAt, null)
     assert.equal(r.drawStartedAt, null)
@@ -103,8 +104,8 @@ test("journal.progress stamps progressAt only when the percentage changes", () =
     assert.equal(r.progressAt, new Date(12000).toISOString())
 })
 
-test("records written before the draw timestamps load with them as null", () => {
-    const journal = freshJournal({ version: 1, nextRenderID: 2, renders: [{ renderID: 1, status: "done", progress: "Done", server: "fishy", source: "", window: null }] })
+test("records written before the draw timestamps load with them as null", (t) => {
+    const journal = freshJournal(t, { version: 1, nextRenderID: 2, renders: [{ renderID: 1, status: "done", progress: "Done", server: "fishy", source: "", window: null }] })
     assert.equal(journal.get(1).drawStartedAt, null)
     assert.equal(journal.get(1).progressAt, null)
 })

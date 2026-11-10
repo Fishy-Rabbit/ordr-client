@@ -2,6 +2,7 @@ import http from "http"
 import fs from "fs"
 import path from "path"
 import crypto from "crypto"
+import { pipeline } from "stream"
 import Busboy from "busboy"
 import { Config, DEFAULT_RESOLUTION, PRESETS, VERSION } from "./config"
 import { Journal, RenderOptionValues, RenderRecord } from "./journal"
@@ -140,9 +141,11 @@ type Submission = { fields: Record<string, string>; replay: Buffer | null; repla
 /**
  * Parse a multipart submission under fixed limits (40 fields of at most 4 KiB, one file of at most
  * maxReplayBytes). Only the `replayFile` part is kept; any other file is drained. A malformed body
- * rejects with a 400 HttpError (code 12).
+ * rejects with a 400 HttpError (code 12), and so does an upload the client abandons midway: the
+ * request then closes before it is complete and busboy would wait for the rest forever. Exported
+ * for the tests.
  */
-function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promise<Submission> {
+export function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promise<Submission> {
     return new Promise((resolve, reject) => {
         let bb: Busboy.Busboy
         try {
@@ -168,6 +171,10 @@ function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promi
         })
         bb.on("error", err => reject(new HttpError(400, 12, `bad multipart request: ${(err as Error).message}`)))
         bb.on("close", () => resolve(out))
+        req.on("error", err => reject(new HttpError(400, 12, `bad multipart request: ${err.message}`)))
+        req.on("close", () => {
+            if (!req.complete) reject(new HttpError(400, 12, "the upload was aborted before the request was complete"))
+        })
         req.pipe(bb)
     })
 }
@@ -340,7 +347,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
 
     /**
      * Serve a finished video the caller may see, with HEAD and single byte-range (206) support;
-     * anything else is a 404.
+     * anything else is a 404. The file goes out through stream.pipeline, so a player that drops the
+     * connection (every seek does) releases the file descriptor, and a read error (the file deleted
+     * after the checks, a directory, EMFILE) is logged and ends that response instead of throwing
+     * an unhandled stream error that would stop the worker.
      */
     const serveVideo = (req: http.IncomingMessage, res: http.ServerResponse, name: string, caller: Caller): void => {
         const match = name.match(/^(?:render)?(\d+)\.mp4$/)
@@ -348,7 +358,13 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         if (!record || !canSee(caller, record) || record.status !== "done" || record.removed || !record.videoFile || !fs.existsSync(record.videoFile)) {
             throw new HttpError(404, 404, "no such video")
         }
-        const size = fs.statSync(record.videoFile).size
+        const file = record.videoFile
+        /** Stream the file (or the byte range) into the response; a client hanging up early is not logged. */
+        const send = (range?: { start: number; end: number }) =>
+            pipeline(fs.createReadStream(file, range), res, err => {
+                if (err && (err as NodeJS.ErrnoException).code !== "ERR_STREAM_PREMATURE_CLOSE") log(`video ${record.renderID}: ${err.message}`)
+            })
+        const size = fs.statSync(file).size
         const headers: http.OutgoingHttpHeaders = { "Content-Type": "video/mp4", "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600", "Content-Disposition": `inline; filename="render${record.renderID}.mp4"` }
         const range = req.headers.range
         if (range) {
@@ -358,9 +374,9 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
                 res.end()
                 return
             }
-            let start = m[1] === "" ? Math.max(0, size - Number(m[2])) : Number(m[1])
-            let end = m[2] === "" || m[1] === "" ? size - 1 : Math.min(size - 1, Number(m[2]))
-            if (m[1] === "") start = Math.max(0, size - Number(m[2]))
+            // "bytes=-N" is the last N bytes; "bytes=N-" runs to the end.
+            const start = m[1] === "" ? Math.max(0, size - Number(m[2])) : Number(m[1])
+            const end = m[2] === "" || m[1] === "" ? size - 1 : Math.min(size - 1, Number(m[2]))
             if (start >= size || start > end) {
                 res.writeHead(416, { "Content-Range": `bytes */${size}` })
                 res.end()
@@ -373,16 +389,16 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
                 res.end()
                 return
             }
-            fs.createReadStream(record.videoFile, { start, end }).pipe(res)
+            send({ start, end })
             return
         }
         headers["Content-Length"] = size
         res.writeHead(200, headers)
         if (req.method === "HEAD") {
-                res.end()
-                return
-            }
-        fs.createReadStream(record.videoFile).pipe(res)
+            res.end()
+            return
+        }
+        send()
     }
 
     /**

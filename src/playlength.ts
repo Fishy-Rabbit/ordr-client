@@ -78,11 +78,20 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
 
 const COMMA = 44
 const BAR = 124
+const MINUS = 45
+const DIGIT_0 = 48
+const DIGIT_9 = 57
+/** The longest delta read in place: every integer under 10^15 is exact in a double, digit by digit. */
+const MAX_PLAIN_DIGITS = 15
 
 /**
  * The song time (ms) of the last frame: the frames' time deltas summed, the seed frame and
  * malformed frames (fewer than four "|"-separated fields, non-finite delta) skipped. One
  * pass over the characters, no arrays: linear whatever the text holds. Null past MAX_SONG_MS.
+ * The delta osu! writes is a plain integer ("-?digits"); it is read in place while the pass goes
+ * by, so a well-formed frame allocates nothing. Any other spelling (a sign other than a leading
+ * "-", a decimal point, an exponent, spaces, more than 15 digits, an empty field) is cut out and
+ * read by Number(), so every delta means exactly what Number() makes of it, as it always did.
  */
 export function framesEndMs(text: string | null): number | null {
     if (!text) return null
@@ -92,6 +101,11 @@ export function framesEndMs(text: string | null): number | null {
     let frameStart = 0
     let firstBar = -1
     let bars = 0
+    // The delta field so far: its digits as a number, a leading "-", and whether it is still plain.
+    let digitsValue = 0
+    let digits = 0
+    let negative = false
+    let plain = true
     for (let k = 0; k <= text.length; k++) {
         const c = k < text.length ? text.charCodeAt(k) : COMMA
         if (c === BAR) {
@@ -99,7 +113,7 @@ export function framesEndMs(text: string | null): number | null {
             bars++
         } else if (c === COMMA) {
             if (bars >= 3) {
-                const w = Number(text.slice(frameStart, firstBar))
+                const w = plain && digits > 0 && digits <= MAX_PLAIN_DIGITS ? (negative ? -digitsValue : digitsValue) : Number(text.slice(frameStart, firstBar))
                 if (Number.isFinite(w) && w !== SEED_FRAME) {
                     t += w
                     counted++
@@ -109,6 +123,19 @@ export function framesEndMs(text: string | null): number | null {
             frameStart = k + 1
             firstBar = -1
             bars = 0
+            digitsValue = 0
+            digits = 0
+            negative = false
+            plain = true
+        } else if (bars === 0 && plain) {
+            if (c >= DIGIT_0 && c <= DIGIT_9) {
+                digitsValue = digitsValue * 10 + (c - DIGIT_0)
+                digits++
+            } else if (c === MINUS && k === frameStart) {
+                negative = true
+            } else {
+                plain = false
+            }
         }
     }
     if (counted === 0 || end <= 0 || end > MAX_SONG_MS) return null

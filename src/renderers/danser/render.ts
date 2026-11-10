@@ -41,6 +41,13 @@ export type DanserRunArgs = {
 /** danser log lines kept for error messages. */
 const TAIL_LINES = 40
 
+/**
+ * After danser exits, how long run() waits for its output to close before deciding without it. The
+ * pipes close within milliseconds of a normal exit, but a child danser left running (its ffmpeg)
+ * holds them open until it ends.
+ */
+const CLOSE_GRACE_MS = 2000
+
 /** The danser-cli command line for one render; a full render's is exactly what it always was. */
 export function danserArguments(a: Pick<DanserRunArgs, "replayPath" | "outName" | "settingsName" | "window">): string[] {
     return ["-replay", a.replayPath, "-out", a.outName, "-noupdatecheck", "-skip", `-settings=${a.settingsName}`, ...windowArgs(a.window)]
@@ -68,8 +75,12 @@ export class DanserRun {
     }
 
     /**
-     * Start danser and settle when it exits: the video path on success, else the abort reason, the
-     * first failure recognised in its log, or code 21; each failure carries the log tail.
+     * Start danser and settle exactly once: when its output has closed after it exited (so its last
+     * lines, "Finished." among them, have been read), CLOSE_GRACE_MS after the exit if a child of
+     * danser keeps the output open, or at once when danser cannot be started at all. The answer is
+     * the video path on success, else the abort reason, the first failure recognised in its log, or
+     * code 21; each failure carries the log tail. The time limit and the stall detector end a hung
+     * run through abort(). Settling stops both timers and drops the process handle.
      */
     run(): Promise<DanserOutcome> {
         const a = this.args
@@ -112,10 +123,12 @@ export class DanserRun {
                 let seen = false
                 for (const dir of tempDirs) {
                     for (const f of ["video.mp4", "audio.mp4"]) {
-                        const p = path.join(dir, f)
-                        if (fs.existsSync(p)) {
+                        // danser deletes these after muxing; one gone between checks is no error
+                        // (a throw here would be uncaught and take the whole worker down).
+                        const st = fs.statSync(path.join(dir, f), { throwIfNoEntry: false })
+                        if (st) {
                             seen = true
-                            size += fs.statSync(p).size
+                            size += st.size
                         }
                     }
                 }
@@ -129,12 +142,38 @@ export class DanserRun {
                 }
             }, a.stallMs / 2)
 
+            let settled = false
+            let closeWait: NodeJS.Timeout | null = null
+            /** Resolve once: stop both timers and the close wait and drop the process handle; later calls do nothing. */
+            const settle = (outcome: DanserOutcome) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timeout)
+                clearInterval(stall)
+                if (closeWait) clearTimeout(closeWait)
+                this.proc = null
+                resolve(outcome)
+            }
+            /**
+             * Settle with how the run ended, once danser is gone: the video when danser said
+             * "Finished." and wrote it, else the abort reason, the first failure seen in the log, or
+             * code 21 naming the exit code or signal.
+             */
+            const conclude = (code: number | null, signal: NodeJS.Signals | null) => {
+                if (finished && fs.existsSync(videoPath)) return settle({ success: true, videoPath })
+                if (this.abortCode !== null) return settle({ success: false, errorCode: this.abortCode, errorMessage: `${this.abortMessage}\n${tailText()}`.trim() })
+                if (errorCode !== null) return settle({ success: false, errorCode, errorMessage: `${errorMessage}\n${tailText()}`.trim() })
+                const why = panicking ? "danser panicked" : finished ? "danser finished but wrote no video" : `danser exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
+                settle({ success: false, errorCode: 21, errorMessage: `${why}\n${tailText()}`.trim() })
+            }
+
             /**
              * Read one log line: the draw start and progress from stdout, known failure shapes and
-             * panics from either stream.
+             * panics from either stream. Lines arriving after the run settled (from a child danser
+             * left running) are ignored, so they cannot rewrite a finished render's progress.
              */
             const onLine = (line: string, stream: "stdout" | "stderr") => {
-                if (!line.trim()) return
+                if (settled || !line.trim()) return
                 remember(line)
                 if (a.debug) a.log(`[danser ${stream}] ${line}`)
 
@@ -190,26 +229,14 @@ export class DanserRun {
 
             proc.on("error", err => {
                 fail(21, `could not start danser: ${err.message}`)
+                // No pid: danser never started, and no exit is guaranteed to follow.
+                if (proc.pid === undefined) conclude(null, null)
             })
+            // At exit, stdout may still hold danser's last lines; close comes once they are read.
             proc.on("exit", (code, signal) => {
-                clearTimeout(timeout)
-                clearInterval(stall)
-                this.proc = null
-                if (finished && fs.existsSync(videoPath)) {
-                    resolve({ success: true, videoPath })
-                    return
-                }
-                if (this.abortCode !== null) {
-                    resolve({ success: false, errorCode: this.abortCode, errorMessage: `${this.abortMessage}\n${tailText()}`.trim() })
-                    return
-                }
-                if (errorCode !== null) {
-                    resolve({ success: false, errorCode, errorMessage: `${errorMessage}\n${tailText()}`.trim() })
-                    return
-                }
-                const why = panicking ? "danser panicked" : finished ? "danser finished but wrote no video" : `danser exited with code ${code}${signal ? ` (signal ${signal})` : ""}`
-                resolve({ success: false, errorCode: 21, errorMessage: `${why}\n${tailText()}`.trim() })
+                closeWait = setTimeout(() => conclude(code, signal), CLOSE_GRACE_MS)
             })
+            proc.on("close", (code, signal) => conclude(code, signal))
         })
     }
 }

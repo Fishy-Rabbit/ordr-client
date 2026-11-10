@@ -74,13 +74,19 @@ class Reader {
         this.offset += 8
         return v
     }
-    /** A ULEB128 string length of at most five bytes; a longer one is refused (code 2). */
+    /**
+     * A ULEB128 string length of at most five bytes; a longer one is refused (code 2). The value
+     * is built with arithmetic, not `<<`/`|=`, which work on signed 32-bit integers: a fifth byte
+     * with its high bits set would turn the length negative, and a negative length passes the
+     * bounds check and moves the cursor backwards. As a plain number it stays positive and a length
+     * past the end of the file is refused as truncated (code 5).
+     */
     uleb(): number {
         let result = 0
         let shift = 0
         for (;;) {
             const b = this.u8()
-            result |= (b & 0x7f) << shift
+            result += (b & 0x7f) * 2 ** shift
             if ((b & 0x80) === 0) return result
             shift += 7
             if (shift > 28) throw new ReplayParseError("bad string length in replay header", 2)
