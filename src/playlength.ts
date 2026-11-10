@@ -1,5 +1,5 @@
 import { spawn } from "child_process"
-import { childEnv } from "./childenv"
+import { onlyEnv } from "./childenv"
 import type { ReplayHeader } from "./osr"
 import type { RenderWindow } from "./window"
 
@@ -54,7 +54,7 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
             clearTimeout(timer)
             resolve(value)
         }
-        const proc = spawn(opts.xzPath ?? "xz", ["--format=lzma", "--decompress", "--stdout", "--memlimit-decompress=32MiB"], { env: childEnv(), stdio: ["pipe", "pipe", "ignore"] })
+        const proc = spawn(opts.xzPath ?? "xz", ["--format=lzma", "--decompress", "--stdout", "--memlimit-decompress=32MiB"], { env: onlyEnv(["PATH"]), stdio: ["pipe", "pipe", "ignore"] })
         const timer = setTimeout(() => {
             proc.kill("SIGKILL")
             finish(null)

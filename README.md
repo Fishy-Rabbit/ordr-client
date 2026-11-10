@@ -135,10 +135,14 @@ render is recorded, so parallel uploads hold at most `RENDER_MAX_UPLOADS` x `REN
 per key (the staff key, or each scoped key's server). The queue checks run again right before
 the render is recorded, with nothing awaited in between.
 
-danser, xz and Xvfb get the worker's environment without its `RENDER_*` settings and without
-any variable whose name reads as a key, token, secret or password, so a child that a crafted
-replay or map set takes over does not find the API keys there. They still run as the worker's
-user, with the same access to its files.
+xz, which reads the replay frames callers send, gets `PATH` and nothing else. danser and Xvfb
+get the worker's environment without its `RENDER_*` settings and without any variable whose name
+reads as a key, token, secret, password or auth setting (such as `DOCKER_AUTH_CONFIG` or
+`SSH_AUTH_SOCK`), so a child that a crafted replay or map set takes over does not find the API
+keys there. A credential under another name (a database URL, say) still reaches danser and
+Xvfb, so keep unrelated credentials out of the worker's environment. The children still run as
+the worker's user, with the same access to its files and sockets (withholding `SSH_AUTH_SOCK`
+hides the path, not the socket).
 
 ### Map cache
 
