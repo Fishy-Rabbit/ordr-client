@@ -18,6 +18,7 @@ const { parseScopedKeys } = require("../build/config")
 
 const STAFF = "staff-key"
 const HINAI = "hinai-key"
+/** The SHA-256 of a key as lowercase hex, the form RENDER_SCOPED_KEYS holds. */
 const sha256hex = (text) => crypto.createHash("sha256").update(text).digest("hex")
 const FIELDS = { beatmapsetId: "1", beatmapMd5: "0123456789abcdef0123456789abcdef", server: "hinai", source: "hinai beatmap page", resolution: "640x480" }
 
@@ -152,11 +153,13 @@ test("a scoped key reads only its own server's renders, queue jobs and videos", 
         const hinaiDone = seed(journal, "hinai", "done", { videoFile: video })
         const hinaiQueued = seed(journal, "hinai", "queued")
 
+        /** The render ids GET /renders?renderID= shows this key. */
         const one = async (key, id) => (await call(base, key, "GET", `/renders?renderID=${id}`)).body.renders.map((r) => r.renderID)
         assert.deepEqual(await one(HINAI, hinaiDone.renderID), [hinaiDone.renderID])
         assert.deepEqual(await one(HINAI, fishyDone.renderID), [])
         assert.deepEqual(await one(STAFF, fishyDone.renderID), [fishyDone.renderID])
 
+        /** The server of each render GET /renders lists for this key. */
         const list = async (key) => (await call(base, key, "GET", "/renders")).body.renders.map((r) => r.server)
         assert.deepEqual(await list(HINAI), ["hinai", "hinai"])
         assert.deepEqual((await list(STAFF)).sort(), ["fishy", "fishy", "hinai", "hinai"])

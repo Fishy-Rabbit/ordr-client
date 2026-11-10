@@ -12,8 +12,13 @@ import { DanserRun } from "./renderers/danser/render"
 import { windowedOptions } from "./window"
 import { touchSong } from "./songcache"
 
+/**
+ * One render slot: its index and X display, its work root, its own copy of danser, and its songs
+ * and videos folders.
+ */
 export type SlotPaths = { index: number; display: string; root: string; danserDir: string; songsDir: string; videosDir: string }
 
+/** Resolve after `ms` milliseconds. */
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /** Abort code reserved for shutdown: the render is re-queued instead of failed. */
@@ -90,12 +95,18 @@ export async function generateSettingsTemplate(cfg: Config, slot: SlotPaths, log
     }
 }
 
+/** Where a render's uploaded replay waits until its render ends: `<replaysDir>/<renderID>.osr`. */
 export function replayPath(cfg: Config, renderID: number): string {
     return path.join(cfg.replaysDir, `${renderID}.osr`)
 }
 
+/**
+ * The render options from a record's stored values: the default for each one absent, booleans read
+ * leniently, the background dim clamped to 0..100 and the cursor size to 0.5..2.
+ */
 export function parseOptions(raw: Record<string, string | number | boolean>): RenderOptions {
     const o: RenderOptions = { ...DEFAULT_OPTIONS }
+    /** A lenient boolean: true, "true", "1" or 1 is true; undefined keeps the fallback; anything else is false. */
     const bool = (v: unknown, fallback: boolean) => (v === undefined ? fallback : v === true || v === "true" || v === "1" || v === 1)
     o.showPPCounter = bool(raw.showPPCounter, o.showPPCounter)
     o.showHitErrorMeter = bool(raw.showHitErrorMeter, o.showHitErrorMeter)
@@ -146,6 +157,7 @@ async function fetchFromMirror(cfg: Config, url: string): Promise<Response> {
     return res
 }
 
+/** ensureOsz's answer: the path of the cached .osz, or why the map is not available. */
 type OszResult = { ok: true; path: string } | { ok: false; message: string }
 
 /**
@@ -187,6 +199,7 @@ export async function ensureOsz(cfg: Config, setId: number, log: (line: string) 
     return { ok: true, path: dest }
 }
 
+/** Whether the replay's difficulty is in the set, and the title to show for it. */
 type DiffInfo = { found: boolean; title: string }
 
 /** Find the difficulty the replay was played on and name it "Artist - Title [Version]". */
@@ -198,6 +211,7 @@ function inspectOsz(oszPath: string, beatmapMd5: string | null): DiffInfo {
         const data = entry.getData()
         const md5 = crypto.createHash("md5").update(data).digest("hex")
         const text = data.toString("utf8", 0, Math.min(data.length, 16384))
+        /** The value of the first `<key>:` line in the difficulty file's first 16 KiB, or an empty string. */
         const pick = (key: string) => text.match(new RegExp(`^${key}:\\s*(.*?)\\s*$`, "m"))?.[1] ?? ""
         const title = `${pick("Artist")} - ${pick("Title")} [${pick("Version")}]`
         if (!fallbackTitle) fallbackTitle = title
@@ -206,6 +220,10 @@ function inspectOsz(oszPath: string, beatmapMd5: string | null): DiffInfo {
     return { found: !beatmapMd5, title: fallbackTitle }
 }
 
+/**
+ * Empty the slot's songs folder, its videos folder and danser's own videos folder, and delete
+ * danser's beatmap database, so nothing from one render carries into the next.
+ */
 function cleanSlot(slot: SlotPaths): void {
     for (const dir of [slot.songsDir, slot.videosDir, path.join(slot.danserDir, "videos")]) {
         fs.rmSync(dir, { recursive: true, force: true })
@@ -214,6 +232,7 @@ function cleanSlot(slot: SlotPaths): void {
     fs.rmSync(path.join(slot.danserDir, "danser.db"), { force: true })
 }
 
+/** Rename a file, falling back to copy and delete when the move crosses filesystems (EXDEV). */
 function moveFile(from: string, to: string): void {
     try {
         fs.renameSync(from, to)
@@ -231,6 +250,7 @@ function moveFile(from: string, to: string): void {
 export async function runRenderJob(cfg: Config, journal: Journal, record: RenderRecord, slot: SlotPaths, template: Json, log: (line: string) => void, register: (run: DanserRun | null) => void): Promise<void> {
     const id = record.renderID
     const osr = replayPath(cfg, id)
+    /** Mark the render failed with this code and message, delete its replay, and log the message's first line. */
     const finishFail = (errorCode: number, errorMessage: string) => {
         journal.update(id, { status: "failed", errorCode, errorMessage, progress: "Failed", finishedAt: new Date().toISOString(), slot: slot.index })
         fs.rmSync(osr, { force: true })
@@ -284,7 +304,9 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         timeoutMs: cfg.timeoutMs,
         stallMs: cfg.stallMs,
         debug: cfg.debug,
+        /** danser's progress text, stored as a lazily written tick. */
         onProgress: progress => journal.progress(id, progress),
+        /** Stamp when danser starts drawing; the ETA projects the job's speed from it. */
         onDrawStart: () => journal.update(id, { drawStartedAt: new Date().toISOString() }),
         log
     })

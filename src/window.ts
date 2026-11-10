@@ -11,13 +11,16 @@
  */
 import type { RenderOptions } from "./renderers/danser/prepare"
 
+/** A clip of the play in whole seconds of song position, start before end. */
 export type RenderWindow = { start: number; end: number }
 
 /** The latest `end` accepted: a day of song time, far past any beatmap. */
 export const MAX_WINDOW_END_SECONDS = 86400
 
+/** parseRenderWindow's answer: the window (null for a full render), or why the fields were refused. */
 export type WindowParse = { ok: true; window: RenderWindow | null } | { ok: false; message: string }
 
+/** One to five digits: whole seconds, no sign and no fraction. */
 const WHOLE_SECONDS = /^\d{1,5}$/
 
 /** Read the two multipart fields: blank or absent = no window; both or neither; whole seconds; 0 <= start < end <= a day. */

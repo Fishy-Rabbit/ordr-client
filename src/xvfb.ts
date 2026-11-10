@@ -1,6 +1,7 @@
 import { spawn, ChildProcess } from "child_process"
 import fs from "fs"
 
+/** Resolve after `ms` milliseconds. */
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /**
@@ -13,19 +14,26 @@ export class Xvfb {
     private stopping = false
     private stderrTail = ""
 
+    /** `display` is this slot's display number; `log` receives the server's lifecycle messages. */
     constructor(
         public readonly display: number,
         private readonly log: (line: string) => void
     ) {}
 
+    /** The X display name, `:<display>`. */
     get displayName(): string {
         return `:${this.display}`
     }
 
+    /** True from start() until the Xvfb process exits. */
     get alive(): boolean {
         return this.proc !== null
     }
 
+    /**
+     * Start Xvfb on this display, clearing a stale lock first, and wait for its socket. If it exits
+     * later without stop(), it is started again 2 s later.
+     */
     async start(): Promise<void> {
         // /tmp may be a fresh empty volume (the k8s emptyDir): Xvfb needs the
         // socket directory to exist, world-writable and sticky, and creating it
@@ -61,6 +69,7 @@ export class Xvfb {
         await this.waitReady()
     }
 
+    /** Wait up to 10 s for the display's socket, failing at once if Xvfb has already exited. */
     private async waitReady(): Promise<void> {
         const socket = `/tmp/.X11-unix/X${this.display}`
         for (let i = 0; i < 100; i++) {
@@ -71,6 +80,7 @@ export class Xvfb {
         throw new Error(`Xvfb ${this.displayName} did not come up within 10s`)
     }
 
+    /** Stop the server for good: no respawn after this. */
     stop(): void {
         this.stopping = true
         this.proc?.kill("SIGTERM")

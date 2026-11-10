@@ -3,10 +3,13 @@ import path from "path"
 import { progressPercent, serverFor } from "./fleet"
 import type { RenderWindow } from "./window"
 
+/** A render's lifecycle: queued, then rendering, then done or failed (a restart puts rendering jobs back to queued). */
 export type RenderStatus = "queued" | "rendering" | "done" | "failed"
 
+/** The option fields as the client sent them; parseOptions reads them when the job runs. */
 export type RenderOptionValues = Record<string, string | number | boolean>
 
+/** One render as the journal stores it; the API's wire shape is built from it (server.ts toApi). */
 export type RenderRecord = {
     renderID: number
     status: RenderStatus
@@ -42,8 +45,10 @@ export type RenderRecord = {
     slot: number | null
 }
 
+/** What a submission supplies for a new record; create() fills in the id, the status and the timestamps. */
 type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5"> & { window?: RenderWindow | null; playSeconds?: number | null }
 
+/** The layout of renders.json. */
 type JournalFile = { version: 1; nextRenderID: number; renders: RenderRecord[] }
 
 /**
@@ -58,10 +63,15 @@ export class Journal {
     private byId = new Map<number, RenderRecord>()
     private pending: NodeJS.Timeout | null = null
 
+    /** The journal is `<stateDir>/renders.json`; nothing is read until load(). */
     constructor(stateDir: string) {
         this.file = path.join(stateDir, "renders.json")
     }
 
+    /**
+     * Read the journal file if it exists, back-filling the fields older records lack and setting
+     * the next id past the highest one on record.
+     */
     load(): void {
         if (!fs.existsSync(this.file)) return
         const parsed = JSON.parse(fs.readFileSync(this.file, "utf-8")) as Partial<JournalFile>
@@ -82,6 +92,7 @@ export class Journal {
         this.data = { version: 1, nextRenderID: Math.max(Number(parsed.nextRenderID) || 1, maxId + 1), renders }
     }
 
+    /** Write the whole journal now (a temp file, then a rename) and cancel any pending deferred write. */
     flush(): void {
         if (this.pending) {
             clearTimeout(this.pending)
@@ -92,6 +103,10 @@ export class Journal {
         fs.renameSync(tmp, this.file)
     }
 
+    /**
+     * Write the journal within 500 ms; writes requested in the meantime share it. A failed deferred
+     * write is logged, not thrown.
+     */
     private scheduleFlush(): void {
         if (this.pending) return
         this.pending = setTimeout(() => {
@@ -104,6 +119,7 @@ export class Journal {
         }, 500)
     }
 
+    /** Add a queued render with the next id and write the journal at once. */
     create(fields: NewRecordFields): RenderRecord {
         const record: RenderRecord = {
             renderID: this.data.nextRenderID++,
@@ -130,10 +146,12 @@ export class Journal {
         return record
     }
 
+    /** The render with this id, if there is one. */
     get(id: number): RenderRecord | undefined {
         return this.byId.get(id)
     }
 
+    /** Every render on record, oldest first (the journal's own array, not a copy). */
     all(): RenderRecord[] {
         return this.data.renders
     }
@@ -169,6 +187,7 @@ export class Journal {
         return this.data.renders.filter(r => r.status === "queued")
     }
 
+    /** How many renders are queued and how many are rendering. */
     counts(): { queued: number; rendering: number } {
         let queued = 0
         let rendering = 0
@@ -194,6 +213,7 @@ export class Journal {
         return out
     }
 
+    /** The `n` most recent renders in any state, newest first. */
     latest(n: number): RenderRecord[] {
         return this.data.renders.slice(-n).reverse()
     }

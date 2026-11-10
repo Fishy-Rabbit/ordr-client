@@ -11,9 +11,12 @@ import type { Journal } from "./journal"
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000
+/** A cached set: `<setId>.osz`. */
 const SET_FILE = /^(\d+)\.osz$/
+/** A download in progress or abandoned: `<setId>.osz.part`. */
 const PART_FILE = /^\d+\.osz\.part$/
 
+/** What one sweep did: sets removed, bytes freed, sets kept. */
 export type SongSweep = { removed: number; bytes: number; kept: number }
 
 /** Mark a cached set as used now: its mtime is the cache's "last used" clock. Never throws. */

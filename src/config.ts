@@ -1,8 +1,10 @@
 import path from "path"
 import { SERVER_NAME } from "./fleet"
 
+/** This worker's version: GET /health reports it and the boot line logs it. */
 export const VERSION = "1.0.0"
 
+/** One output preset: frame size and rate, and whether it uses the turbo (preview) encoder settings. */
 export type Preset = { width: number; height: number; fps: number; turbo: boolean }
 
 /**
@@ -15,11 +17,13 @@ export const PRESETS: Record<string, Preset> = {
     "1920x1080": { width: 1920, height: 1080, fps: 60, turbo: false },
     "640x480": { width: 640, height: 480, fps: 15, turbo: true }
 }
+/** The resolution a submission gets when it names none. */
 export const DEFAULT_RESOLUTION = "1280x720"
 
 /** One scoped key: it acts for `server` only. The key itself never reaches this process, only its SHA-256. */
 export type ScopedKey = { server: string; hash: Buffer }
 
+/** The worker's configuration, read once from the environment by loadConfig. */
 export type Config = {
     port: number
     /** The staff key: every route, every server's jobs. */
@@ -57,6 +61,10 @@ export type Config = {
     debug: boolean
 }
 
+/**
+ * A numeric environment variable, or `fallback` when it is unset or empty; a value that is not a
+ * finite number refuses the boot.
+ */
 function num(name: string, fallback: number): number {
     const raw = process.env[name]
     if (raw === undefined || raw === "") return fallback
@@ -65,6 +73,7 @@ function num(name: string, fallback: number): number {
     return n
 }
 
+/** A string environment variable, or `fallback` when it is unset or empty. */
 function str(name: string, fallback: string): string {
     const raw = process.env[name]
     return raw === undefined || raw === "" ? fallback : raw
@@ -121,6 +130,10 @@ export function parseScopedKeys(raw: string): ScopedKey[] {
     return out
 }
 
+/**
+ * A boolean environment variable: 1, true, yes or on (any case, surrounding spaces ignored) is
+ * true; anything else, or unset, is false.
+ */
 function flag(name: string): boolean {
     const raw = (process.env[name] ?? "").trim().toLowerCase()
     return raw === "1" || raw === "true" || raw === "yes" || raw === "on"

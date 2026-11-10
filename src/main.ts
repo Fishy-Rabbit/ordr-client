@@ -11,8 +11,14 @@ import { createServer } from "./server"
 import { defaultSkinFolder } from "./skins"
 
 injectTimestamp()
+/** Write one line to stdout; injectTimestamp prefixes it with the time. */
 const log = (line: string) => console.log(line)
 
+/**
+ * Boot the worker: read the configuration and the journal, start one Xvfb display and slot per
+ * RENDER_CONCURRENCY (none in fake mode), capture danser's settings template, then start the
+ * scheduler and the HTTP server and wire SIGTERM and SIGINT to a graceful shutdown.
+ */
 async function main(): Promise<void> {
     const cfg = loadConfig()
     log(`ordr-render ${VERSION} starting (${cfg.fake ? "FAKE mode" : `danser ${cfg.danserVersion}, ${cfg.concurrency} slot(s) x ${cfg.threadsPerSlot} threads`})`)
@@ -54,6 +60,10 @@ async function main(): Promise<void> {
     server.listen(cfg.port, "0.0.0.0", () => log(`listening on :${cfg.port}`))
 
     let shuttingDown = false
+    /**
+     * Close the server, stop the scheduler (running renders are aborted and re-queued) and the
+     * displays, then flush the journal and exit 1.5 s later. A second signal is ignored.
+     */
     const shutdown = (signal: string) => {
         if (shuttingDown) return
         shuttingDown = true

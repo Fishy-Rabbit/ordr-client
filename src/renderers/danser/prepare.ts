@@ -10,6 +10,7 @@ import fs from "fs"
 import path from "path"
 import { Preset } from "../../config"
 
+/** The eight options a client may set per render; danser's other settings are fixed in buildDanserSettings. */
 export type RenderOptions = {
     showPPCounter: boolean
     showHitErrorMeter: boolean
@@ -21,6 +22,7 @@ export type RenderOptions = {
     cursorSize: number
 }
 
+/** The value of each option a submission leaves out. */
 export const DEFAULT_OPTIONS: RenderOptions = {
     showPPCounter: true,
     showHitErrorMeter: true,
@@ -32,8 +34,13 @@ export const DEFAULT_OPTIONS: RenderOptions = {
     cursorSize: 1
 }
 
+/** A danser settings document, or one of its sections, as plain JSON. */
 export type Json = Record<string, unknown>
 
+/**
+ * Set a dotted path such as "Recording.FPS" in a settings document, creating any missing section
+ * and replacing a non-object one on the way.
+ */
 function set(root: Json, dotted: string, value: unknown): void {
     const parts = dotted.split(".")
     let node: Json = root
@@ -47,6 +54,10 @@ function set(root: Json, dotted: string, value: unknown): void {
     node[parts[parts.length - 1]] = value
 }
 
+/**
+ * What one render's settings need: the slot's songs and output folders, the shared skins folder,
+ * the resolution preset, the options and the skin folder name.
+ */
 export type SettingsArgs = {
     songsDir: string
     skinsDir: string

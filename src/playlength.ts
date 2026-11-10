@@ -22,8 +22,10 @@ export const MAX_SONG_MS = 3 * 3600 * 1000
 
 /** xz processes allowed at once; a submission past this gets no length rather than waiting. */
 const MAX_CONCURRENT_XZ = 2
+/** xz processes running now (at most MAX_CONCURRENT_XZ). */
 let runningXz = 0
 
+/** An xz run still going after this long is killed and gives no length. */
 const XZ_TIMEOUT_MS = 10_000
 const MOD_DOUBLETIME = 1 << 6
 const MOD_HALFTIME = 1 << 8
@@ -31,6 +33,7 @@ const MOD_NIGHTCORE = 1 << 9
 /** The frame osu! appends to carry the RNG seed; its time is not a time. */
 const SEED_FRAME = -12345
 
+/** Overrides for decompressFrames (tests use them): the output cap, the xz binary and the time limit. */
 export type DecompressOptions = { maxBytes?: number; xzPath?: string; timeoutMs?: number }
 
 /** The frame block as text, or null when it is not LZMA, too large, or xz is missing or fails. */
@@ -43,6 +46,7 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
 
     return new Promise(resolve => {
         let done = false
+        /** Settle once: clear the timer and resolve; later calls do nothing. */
         const finish = (value: string | null) => {
             if (done) return
             done = true

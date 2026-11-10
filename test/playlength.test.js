@@ -23,6 +23,7 @@ const { Journal } = require("../build/journal")
 const { createServer } = require("../build/server")
 
 const FIXTURE = fs.readFileSync(path.join(__dirname, "fixtures", "frames-30s.lzma"))
+/** Whether an xz binary is on PATH; the tests that need one are skipped without it. */
 const HAS_XZ = (() => {
     try {
         execFileSync("xz", ["--version"], { stdio: "ignore" })
@@ -35,10 +36,15 @@ const TYPICAL = { seconds: 63, basis: "measured" }
 
 /** A minimal but valid osu!standard .osr around a frame block. */
 function osr(frames, mods = 0) {
+    /** One byte. */
     const u8 = (v) => Buffer.from([v])
+    /** A 16-bit little-endian integer. */
     const u16 = (v) => { const b = Buffer.alloc(2); b.writeUInt16LE(v); return b }
+    /** A 32-bit little-endian integer. */
     const u32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32LE(v); return b }
+    /** A 64-bit little-endian integer. */
     const i64 = (v) => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(v)); return b }
+    /** An osu! string: 0x00 when empty, else 0x0b, a one-byte length and the bytes. */
     const str = (s) => (s === "" ? u8(0) : Buffer.concat([u8(0x0b), u8(Buffer.byteLength(s)), Buffer.from(s)]))
     return Buffer.concat([
         u8(0), u32(20251102), str("0123456789abcdef0123456789abcdef"), str("tester"), str("fedcba9876543210fedcba9876543210"),
@@ -182,6 +188,7 @@ test("POST /renders records the play length the replay's frames give", { skip: !
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
     try {
         const boundary = "playlentest"
+        /** One multipart text part. */
         const field = (k, v) => `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`
         const body = Buffer.concat([
             Buffer.from(field("beatmapsetId", "1") + field("server", "hinai") + field("resolution", "1280x720")),

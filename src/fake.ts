@@ -6,7 +6,9 @@ import { Config } from "./config"
 import { Journal, RenderRecord } from "./journal"
 import { replayPath } from "./job"
 
+/** execFile as a promise, for the one ffmpeg call below. */
 const execFileAsync = promisify(execFile)
+/** Resolve after `ms` milliseconds. */
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /**

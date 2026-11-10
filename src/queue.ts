@@ -7,6 +7,7 @@ import { runRenderJob, SHUTDOWN_ABORT, SlotPaths } from "./job"
 import { runFakeJob } from "./fake"
 import { sweepSongCache } from "./songcache"
 
+/** A slot's current job: its render id and, once danser starts, the run (so shutdown can abort it). */
 type Active = { renderID: number; run: DanserRun | null }
 
 /**
@@ -20,6 +21,10 @@ export class Scheduler {
     private sweepTimer: NodeJS.Timeout | null = null
     private stopped = false
 
+    /**
+     * The slots, the journal and the boot-time danser settings template come from main(); nothing
+     * runs until start().
+     */
     constructor(
         private readonly cfg: Config,
         private readonly journal: Journal,
@@ -28,10 +33,15 @@ export class Scheduler {
         private readonly log: (line: string) => void
     ) {}
 
+    /** Renders that may run at once: RENDER_CONCURRENCY in fake mode, else one per prepared slot. */
     get slotCount(): number {
         return this.cfg.fake ? this.cfg.concurrency : this.slots.length
     }
 
+    /**
+     * Re-queue renders the last shutdown interrupted, run the first retention and song-cache sweep,
+     * schedule it daily, then fill the free slots.
+     */
     start(): void {
         let requeued = 0
         for (const r of this.journal.all()) {
@@ -46,6 +56,10 @@ export class Scheduler {
         this.tick()
     }
 
+    /**
+     * Give each free slot the oldest queued render not already running. Called at start, after each
+     * submission and after each finished job.
+     */
     tick(): void {
         if (this.stopped) return
         for (let slot = 0; slot < this.slotCount; slot++) {
@@ -57,6 +71,10 @@ export class Scheduler {
         }
     }
 
+    /**
+     * Run one render on one slot (fake or danser). An unexpected throw marks the render failed
+     * (code 21); the slot is then freed and the queue ticked.
+     */
     private async launch(slot: number, record: RenderRecord): Promise<void> {
         const entry: Active = { renderID: record.renderID, run: null }
         this.active.set(slot, entry)
@@ -92,12 +110,17 @@ export class Scheduler {
         if (songs.removed) this.log(`song cache sweep removed ${songs.removed} set(s), ${Math.round(songs.bytes / 1048576)} MB, unused for ${this.cfg.songCacheDays} days; ${songs.kept} kept`)
     }
 
+    /**
+     * Stop scheduling and the daily sweep, and abort running renders with SHUTDOWN_ABORT so they go
+     * back to the queue.
+     */
     stop(): void {
         this.stopped = true
         if (this.sweepTimer) clearInterval(this.sweepTimer)
         for (const a of this.active.values()) a.run?.abort(SHUTDOWN_ABORT, "the worker is shutting down; the render will be re-queued")
     }
 
+    /** A queued render's 1-based place in the FIFO; 0 when it is not queued. */
     queuePosition(record: RenderRecord): number {
         if (record.status !== "queued") return 0
         return this.journal.queued().findIndex(r => r.renderID === record.renderID) + 1

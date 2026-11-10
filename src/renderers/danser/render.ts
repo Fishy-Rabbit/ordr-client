@@ -11,8 +11,13 @@ import path from "path"
 import { spawn, ChildProcess } from "child_process"
 import { RenderWindow, windowArgs } from "../../window"
 
+/** How a run ended: the finished video's path, or an error code and message (with danser's log tail). */
 export type DanserOutcome = { success: true; videoPath: string } | { success: false; errorCode: number; errorMessage: string }
 
+/**
+ * Everything one run needs: the slot's danser copy and paths, the clip, the environment, the time
+ * limits and the callbacks.
+ */
 export type DanserRunArgs = {
     danserDir: string
     replayPath: string
@@ -25,12 +30,15 @@ export type DanserRunArgs = {
     timeoutMs: number
     stallMs: number
     debug: boolean
+    /** Receives each progress text: "Rendering (N%)" while danser draws, then "Finalizing". */
     onProgress: (progress: string) => void
     /** Called once, when danser starts drawing frames (after its pp pre-pass). */
     onDrawStart?: () => void
+    /** The worker's logger; danser's own output is copied to it only when `debug` is set. */
     log: (line: string) => void
 }
 
+/** danser log lines kept for error messages. */
 const TAIL_LINES = 40
 
 /** The danser-cli command line for one render; a full render's is exactly what it always was. */
@@ -38,11 +46,16 @@ export function danserArguments(a: Pick<DanserRunArgs, "replayPath" | "outName" 
     return ["-replay", a.replayPath, "-out", a.outName, "-noupdatecheck", "-skip", `-settings=${a.settingsName}`, ...windowArgs(a.window)]
 }
 
+/**
+ * One danser-cli process for one render: progress from its log, failures mapped to error codes,
+ * killed when it stalls or overruns.
+ */
 export class DanserRun {
     private proc: ChildProcess | null = null
     private abortCode: number | null = null
     private abortMessage = ""
 
+    /** Prepare a run; nothing starts until run(). */
     constructor(private readonly args: DanserRunArgs) {}
 
     /** Kill danser; the first reason given is the one reported. */
@@ -54,15 +67,21 @@ export class DanserRun {
         this.proc?.kill("SIGKILL")
     }
 
+    /**
+     * Start danser and settle when it exits: the video path on success, else the abort reason, the
+     * first failure recognised in its log, or code 21; each failure carries the log tail.
+     */
     run(): Promise<DanserOutcome> {
         const a = this.args
         const videoPath = path.join(a.outputDir, `${a.outName}.mp4`)
         const tempDirs = [path.join(a.danserDir, "videos", `${a.outName}_temp`), path.join(a.outputDir, `${a.outName}_temp`)]
         const tail: string[] = []
+        /** Keep the last TAIL_LINES log lines. */
         const remember = (line: string) => {
             tail.push(line)
             if (tail.length > TAIL_LINES) tail.shift()
         }
+        /** The kept lines as one text, at most its last 1,500 characters. */
         const tailText = () => tail.join("\n").slice(-1500)
 
         let canGetProgress = false
@@ -70,6 +89,7 @@ export class DanserRun {
         let panicking = false
         let errorCode: number | null = null
         let errorMessage = ""
+        /** Record a failure seen in the log; the first one recorded is the one reported. */
         const fail = (code: number, message: string) => {
             if (errorCode === null) {
                 errorCode = code
@@ -109,6 +129,10 @@ export class DanserRun {
                 }
             }, a.stallMs / 2)
 
+            /**
+             * Read one log line: the draw start and progress from stdout, known failure shapes and
+             * panics from either stream.
+             */
             const onLine = (line: string, stream: "stdout" | "stderr") => {
                 if (!line.trim()) return
                 remember(line)
@@ -146,6 +170,7 @@ export class DanserRun {
                 }
                 if (isPanic || line.startsWith("fatal error:")) panicking = true
             }
+            /** Feed a stream to onLine line by line (LF or CRLF), including a last line with no newline. */
             const attach = (stream: NodeJS.ReadableStream | null, name: "stdout" | "stderr") => {
                 if (!stream) return
                 let buffer = ""

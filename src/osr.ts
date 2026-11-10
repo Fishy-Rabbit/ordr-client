@@ -16,9 +16,12 @@ export type ReplayHeader = {
     frameOffset: number
 }
 
+/** The Autoplay mod bit: autoplay replays are refused (error code 11). */
 export const MOD_AUTOPLAY = 1 << 11
 
+/** A replay that cannot be read; `errorCode` is the error code the API reports for it (server.ts submit). */
 export class ReplayParseError extends Error {
+    /** `errorCode` is the o!rdr error code for this failure (2 = unreadable, 5 = truncated or too small). */
     constructor(
         message: string,
         public readonly errorCode: number
@@ -27,8 +30,13 @@ export class ReplayParseError extends Error {
     }
 }
 
+/**
+ * A bounds-checked little-endian cursor over the replay bytes: a read past the end throws a
+ * ReplayParseError (code 5).
+ */
 class Reader {
     private offset = 0
+    /** Read `buf` from offset 0. */
     constructor(private readonly buf: Buffer) {}
 
     /** Bytes read so far. */
@@ -36,31 +44,37 @@ class Reader {
         return this.offset
     }
 
+    /** Throw a truncated-header error (code 5) unless `n` more bytes remain. */
     private need(n: number): void {
         if (this.offset + n > this.buf.length) throw new ReplayParseError("replay header is truncated", 5)
     }
+    /** One unsigned byte. */
     u8(): number {
         this.need(1)
         return this.buf[this.offset++]
     }
+    /** An unsigned 16-bit little-endian integer. */
     u16(): number {
         this.need(2)
         const v = this.buf.readUInt16LE(this.offset)
         this.offset += 2
         return v
     }
+    /** An unsigned 32-bit little-endian integer. */
     u32(): number {
         this.need(4)
         const v = this.buf.readUInt32LE(this.offset)
         this.offset += 4
         return v
     }
+    /** A signed 64-bit little-endian integer (the replay timestamp). */
     i64(): bigint {
         this.need(8)
         const v = this.buf.readBigInt64LE(this.offset)
         this.offset += 8
         return v
     }
+    /** A ULEB128 string length of at most five bytes; a longer one is refused (code 2). */
     uleb(): number {
         let result = 0
         let shift = 0
@@ -72,6 +86,10 @@ class Reader {
             if (shift > 28) throw new ReplayParseError("bad string length in replay header", 2)
         }
     }
+    /**
+     * An osu! string: 0x00 for empty, or 0x0b, a ULEB128 byte length and UTF-8 bytes; any other
+     * marker is refused (code 2).
+     */
     str(): string {
         const marker = this.u8()
         if (marker === 0x00) return ""
@@ -84,6 +102,11 @@ class Reader {
     }
 }
 
+/**
+ * Read a .osr header up to the frame block. Refuses a buffer under 32 bytes or a truncated header
+ * (code 5), and an unknown ruleset, a bad string or a missing beatmap md5 (code 2). The md5 comes
+ * back lower-case.
+ */
 export function parseReplayHeader(buf: Buffer): ReplayHeader {
     if (buf.length < 32) throw new ReplayParseError("replay file is empty or far too small to be a .osr", 5)
     const r = new Reader(buf)

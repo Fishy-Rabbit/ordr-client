@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 
+/** One entry of GET /skins. */
 export type SkinEntry = {
     id: number
     /** The wire value a client sends back as `skin` in `POST /renders`. */
@@ -65,6 +66,7 @@ export function listSkins(skinsDir: string, defaultSkin = ""): SkinEntry[] {
     return entries
 }
 
+/** The `Name:` line from a skin folder's skin.ini (its first 8 KiB), or null when there is none. */
 function readSkinName(folder: string): string | null {
     const ini = path.join(folder, "skin.ini")
     try {
@@ -93,6 +95,7 @@ export function resolveSkin(skinsDir: string, requested: string, defaultSkin = "
     if (wanted === "" || wanted === "0" || lower === WIRE_DEFAULT) return defaultSkinFolder(skinsDir, defaultSkin) ?? DANSER_BUILTIN
     if (lower === WIRE_DANSER) return DANSER_BUILTIN
     const skins = listSkins(skinsDir, defaultSkin)
+    /** The folder danser gets for an entry: an alias's target, else the entry's own folder. */
     const folderOf = (entry: SkinEntry): string => entry.resolvesTo ?? entry.skin
     if (/^\d+$/.test(wanted)) {
         const byId = skins.find(s => s.id === Number(wanted))

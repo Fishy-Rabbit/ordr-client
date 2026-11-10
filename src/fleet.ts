@@ -37,6 +37,10 @@ export function progressPercent(progress: string): number | null {
     return match ? Math.min(100, Number(match[1])) : null
 }
 
+/**
+ * The typical render length in seconds, and whether it was measured from finished renders or is the
+ * assumed fallback.
+ */
 export type Typical = { seconds: number; basis: "measured" | "assumed" }
 
 /** Median length of the most recent finished renders from every server; the fallback until one finishes. */
@@ -98,6 +102,7 @@ export const ASSUMED_MODEL: RenderModel = { prepSeconds: 10, drawPerPlaySecond: 
 /** Finished renders with a play length and a draw start needed before the model is measured. */
 const MODEL_MIN_SAMPLES = 3
 
+/** The median of a non-empty list (the mean of the middle two for an even count); the input is not modified. */
 function median(values: number[]): number {
     const sorted = [...values].sort((a, b) => a - b)
     const mid = sorted.length >> 1
@@ -192,6 +197,7 @@ export function etaByRender(journal: Journal, slots: number, typical: Typical, n
     return eta
 }
 
+/** Queued and rendering job counts per server name. */
 export type ServerCounts = Record<string, { queued: number; rendering: number }>
 
 /** Active jobs per server; a server with nothing queued or rendering is absent. */

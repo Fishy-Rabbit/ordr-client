@@ -13,9 +13,12 @@ import { parseRenderWindow, type RenderWindow } from "./window"
 import { etaBasisFor, etaByRender, progressPercent, renderModel, serverCounts, serverFor, typicalDuration } from "./fleet"
 import { replayPlaySeconds } from "./playlength"
 
+/** The form fields copied into a render's options; parseOptions validates them when the job runs. */
 const OPTION_KEYS = ["showPPCounter", "showHitErrorMeter", "showResultScreen", "showDanserLogo", "loadVideo", "loadStoryboard", "inGameBGDim", "cursorSize"] as const
 
+/** An error answered as JSON with this HTTP status and error code. */
 class HttpError extends Error {
+    /** `status` is the HTTP status; `errorCode` and the message go into the JSON body. */
     constructor(
         public readonly status: number,
         public readonly errorCode: number,
@@ -25,12 +28,14 @@ class HttpError extends Error {
     }
 }
 
+/** Answer with a JSON body, its exact Content-Length and Cache-Control: no-store. */
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
     const payload = JSON.stringify(body)
     res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(payload), "Cache-Control": "no-store" })
     res.end(payload)
 }
 
+/** Constant-time comparison of a given key with the expected one; false when either is empty or the lengths differ. */
 function keyMatches(expected: string, given: string | undefined): boolean {
     if (!expected || !given) return false
     const a = Buffer.from(expected)
@@ -47,6 +52,7 @@ function keyMatches(expected: string, given: string | undefined): boolean {
  */
 type Caller = { staff: true } | { staff: false; server: string }
 
+/** The caller the staff key identifies; also every caller in fake mode without a key. */
 const STAFF: Caller = { staff: true }
 
 /** The caller a key identifies, or null when it is no key at all. Every scoped digest is compared (no early exit). */
@@ -125,8 +131,17 @@ function toQueueJob(record: RenderRecord, queuePosition: number, eta: number | u
     }
 }
 
+/**
+ * A parsed POST /renders body: the text fields, the replay bytes and file name, and whether the
+ * replay went over the size limit.
+ */
 type Submission = { fields: Record<string, string>; replay: Buffer | null; replayName: string; truncated: boolean }
 
+/**
+ * Parse a multipart submission under fixed limits (40 fields of at most 4 KiB, one file of at most
+ * maxReplayBytes). Only the `replayFile` part is kept; any other file is drained. A malformed body
+ * rejects with a 400 HttpError (code 12).
+ */
 function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promise<Submission> {
     return new Promise((resolve, reject) => {
         let bb: Busboy.Busboy
@@ -157,7 +172,13 @@ function readMultipart(req: http.IncomingMessage, maxReplayBytes: number): Promi
     })
 }
 
+/**
+ * The worker's HTTP API (README): GET /health needs no key; POST and GET /renders, GET /queue, GET
+ * /skins and GET or HEAD /videos/<id>.mp4 need an X-Render-Key, and a scoped key sees only its own
+ * server's renders.
+ */
 export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler, log: (line: string) => void): http.Server {
+    /** The GET /health body: version, queue, slot and per-server counts, and the typical render length. */
     const health = () => {
         const counts = journal.counts()
         const typical = typicalDuration(journal)
@@ -186,6 +207,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         const counts = journal.counts()
         const typical = typicalDuration(journal)
         const eta = etaByRender(journal, scheduler.slotCount, typical)
+        /** True for the renders this caller may see. */
         const mine = (r: RenderRecord) => canSee(caller, r)
         const active = journal.all().filter(r => r.status === "rendering").concat(journal.queued()).filter(mine)
         const recent = caller.staff ? journal.recentFinished(recentLimit) : journal.recentFinished(Number.MAX_SAFE_INTEGER).filter(mine).slice(0, recentLimit)
@@ -211,6 +233,11 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), basis: etaBasisFor(r, model, typical, now) }))
     }
 
+    /**
+     * Validate a POST /renders submission (resolution, skin, options, window, set id, replay
+     * header), admit it, record it and store its replay, then wake the scheduler. Every refusal is
+     * an HttpError.
+     */
     const submit = async (req: http.IncomingMessage, caller: Caller): Promise<{ renderID: number; window: RenderWindow | null }> => {
         const sub = await readMultipart(req, cfg.maxReplayBytes)
         if (sub.truncated) throw new HttpError(413, 5, `the replay is larger than the ${Math.round(cfg.maxReplayBytes / 1048576)} MB limit`)
@@ -258,6 +285,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         if (!caller.staff && asked !== "" && asked !== caller.server) throw new HttpError(403, 403, `this key may only queue ${caller.server} renders`)
         const server = caller.staff ? serverFor(f.server, source) : caller.server
         const scoreId = (f.scoreId ?? "").trim() || null
+        /**
+         * Throw the refusal if there is one: the score already active for this server (409), a full
+         * queue, a scoped server at its cap, or the free-disk floor (503).
+         */
         const admit = () => {
             if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
             if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
@@ -307,6 +338,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return { renderID: record.renderID, window: record.window }
     }
 
+    /**
+     * Serve a finished video the caller may see, with HEAD and single byte-range (206) support;
+     * anything else is a 404.
+     */
     const serveVideo = (req: http.IncomingMessage, res: http.ServerResponse, name: string, caller: Caller): void => {
         const match = name.match(/^(?:render)?(\d+)\.mp4$/)
         const record = match ? journal.get(Number(match[1])) : undefined
@@ -350,6 +385,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         fs.createReadStream(record.videoFile).pipe(res)
     }
 
+    /**
+     * Route one request: /health first, then identify the key (401 without a valid one), then the
+     * authenticated routes; an unknown route is a 404.
+     */
     const handle = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
         const url = new URL(req.url ?? "/", "http://localhost")
         const method = req.method ?? "GET"
