@@ -37,10 +37,12 @@ export type RenderRecord = {
     drawStartedAt: string | null
     /** When the progress percentage last changed; null until the first one. */
     progressAt: string | null
+    /** Seconds of video the replay renders to, read from its frames at submit; null when unknown. */
+    playSeconds: number | null
     slot: number | null
 }
 
-type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5"> & { window?: RenderWindow | null }
+type NewRecordFields = Pick<RenderRecord, "replayUsername" | "mapTitle" | "replayMods" | "resolution" | "skin" | "options" | "source" | "server" | "scoreId" | "beatmapsetId" | "beatmapMd5"> & { window?: RenderWindow | null; playSeconds?: number | null }
 
 type JournalFile = { version: 1; nextRenderID: number; renders: RenderRecord[] }
 
@@ -73,6 +75,7 @@ export class Journal {
             // Records written before the projected ETA (2026-11-10) carry no draw timestamps.
             if (r.drawStartedAt === undefined) r.drawStartedAt = null
             if (r.progressAt === undefined) r.progressAt = null
+            if (r.playSeconds === undefined) r.playSeconds = null
             this.byId.set(r.renderID, r)
             if (r.renderID > maxId) maxId = r.renderID
         }
@@ -118,7 +121,8 @@ export class Journal {
             slot: null,
             date: new Date().toISOString(),
             ...fields,
-            window: fields.window ?? null
+            window: fields.window ?? null,
+            playSeconds: fields.playSeconds ?? null
         }
         this.data.renders.push(record)
         this.byId.set(record.renderID, record)

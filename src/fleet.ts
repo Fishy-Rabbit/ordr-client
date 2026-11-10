@@ -85,16 +85,76 @@ export function projectedSecondsLeft(record: RenderRecord, now: number = Date.no
     return Math.max(5, Math.round(leftAtTick - (now - tick) / 1000))
 }
 
+/** How a render's length follows its play: preparation, then drawing per second of play. */
+export type RenderModel = { prepSeconds: number; drawPerPlaySecond: number; basis: "measured" | "assumed" }
+
+/**
+ * Until three renders have recorded both, the Backup node's numbers from 2026-11-10: 7 to 8 s
+ * from start to the first frame with the map cached (10 leaves room for a mirror download),
+ * and 311 to 323 s to draw 262 s of play, finishing included (1.19 to 1.23 s per second).
+ */
+export const ASSUMED_MODEL: RenderModel = { prepSeconds: 10, drawPerPlaySecond: 1.2, basis: "assumed" }
+
+/** Finished renders with a play length and a draw start needed before the model is measured. */
+const MODEL_MIN_SAMPLES = 3
+
+function median(values: number[]): number {
+    const sorted = [...values].sort((a, b) => a - b)
+    const mid = sorted.length >> 1
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** Medians over the most recent finished renders that recorded their play length and draw start. */
+export function renderModel(journal: Journal): RenderModel {
+    const preps: number[] = []
+    const rates: number[] = []
+    const all = journal.all()
+    for (let i = all.length - 1; i >= 0 && preps.length < DURATION_SAMPLE; i--) {
+        const r = all[i]
+        if (r.status !== "done" || !r.playSeconds || !r.startedAt || !r.drawStartedAt || !r.finishedAt) continue
+        const prep = (Date.parse(r.drawStartedAt) - Date.parse(r.startedAt)) / 1000
+        const draw = (Date.parse(r.finishedAt) - Date.parse(r.drawStartedAt)) / 1000
+        if (!Number.isFinite(prep) || !Number.isFinite(draw) || prep < 0 || draw <= 0) continue
+        preps.push(prep)
+        rates.push(draw / r.playSeconds)
+    }
+    if (preps.length < MODEL_MIN_SAMPLES) return ASSUMED_MODEL
+    return { prepSeconds: Math.round(median(preps) * 10) / 10, drawPerPlaySecond: Math.round(median(rates) * 100) / 100, basis: "measured" }
+}
+
+/** Seconds a whole render of this job should take: from its play length when known, else the median render. */
+export function expectedSeconds(record: RenderRecord, model: RenderModel, typical: Typical): number {
+    if (record.playSeconds && record.playSeconds > 0) return Math.round(model.prepSeconds + model.drawPerPlaySecond * record.playSeconds)
+    return typical.seconds
+}
+
+/** What a job's own estimate rests on: its drawing speed, its play length (under the model), or the median. */
+export function etaBasisFor(record: RenderRecord, model: RenderModel, typical: Typical, now: number = Date.now()): "measured" | "assumed" {
+    if (record.status === "rendering" && projectedSecondsLeft(record, now) !== null) return "measured"
+    if (record.playSeconds && record.playSeconds > 0) return model.basis
+    return typical.basis
+}
+
 /**
  * Seconds a rendering job still needs: projected from its own drawing speed when it has
- * one, else its share of a typical render, else a typical render less the time it has run.
+ * one, else its expected length (from its play length) less the time it has run, else
+ * its share of a typical render, else a typical render less the time it has run.
  */
-function remainingFor(record: RenderRecord, typical: number, now: number): number {
+function remainingFor(record: RenderRecord, typical: Typical, model: RenderModel, now: number): number {
     const projected = projectedSecondsLeft(record, now)
     if (projected !== null) return projected
+    const started = record.startedAt ? Date.parse(record.startedAt) : NaN
+    if (record.playSeconds && record.playSeconds > 0) {
+        const elapsed = Number.isFinite(started) ? (now - started) / 1000 : 0
+        return Math.max(5, Math.round(expectedSeconds(record, model, typical) - elapsed))
+    }
+    return legacyRemaining(record, typical.seconds, started, now)
+}
+
+/** The rule for jobs with no play length: a share of the median, or the median less the time run. */
+function legacyRemaining(record: RenderRecord, typical: number, started: number, now: number): number {
     const pct = progressPercent(record.progress)
     if (pct !== null) return Math.max(5, Math.round((typical * (100 - pct)) / 100))
-    const started = record.startedAt ? Date.parse(record.startedAt) : NaN
     if (Number.isFinite(started)) return Math.max(5, Math.round(typical - (now - started) / 1000))
     return typical
 }
@@ -109,22 +169,23 @@ function insertSorted(list: number[], value: number): void {
 /**
  * Seconds until each active job is done, simulated over the worker's slots.
  * Running jobs need what remainingFor says is left; queued jobs then take
- * the earliest free slot in FIFO order, one typical render each, which is
- * exactly how the scheduler hands them out.
+ * the earliest free slot in FIFO order, each for its own expected length
+ * (its play length under the model, or a median render when unknown), which
+ * is exactly how the scheduler hands them out.
  */
-export function etaByRender(journal: Journal, slots: number, typical: Typical, now: number = Date.now()): Map<number, number> {
+export function etaByRender(journal: Journal, slots: number, typical: Typical, now: number = Date.now(), model: RenderModel = renderModel(journal)): Map<number, number> {
     const eta = new Map<number, number>()
     const freeAt: number[] = []
     for (const r of journal.all()) {
         if (r.status !== "rendering") continue
-        const left = remainingFor(r, typical.seconds, now)
+        const left = remainingFor(r, typical, model, now)
         eta.set(r.renderID, left)
         insertSorted(freeAt, left)
     }
     while (freeAt.length < Math.max(1, slots)) insertSorted(freeAt, 0)
     for (const r of journal.queued()) {
         const start = freeAt.shift() ?? 0
-        const done = start + typical.seconds
+        const done = start + expectedSeconds(r, model, typical)
         eta.set(r.renderID, Math.round(done))
         insertSorted(freeAt, done)
     }

@@ -10,7 +10,8 @@ import { defaultSkinFolder, listSkins, resolveSkin } from "./skins"
 import { MOD_AUTOPLAY, parseReplayHeader, ReplayHeader, ReplayParseError } from "./osr"
 import { replayPath } from "./job"
 import { parseRenderWindow, type RenderWindow } from "./window"
-import { etaByRender, progressPercent, serverCounts, serverFor, Typical, typicalDuration } from "./fleet"
+import { etaBasisFor, etaByRender, progressPercent, renderModel, serverCounts, serverFor, typicalDuration } from "./fleet"
+import { replayPlaySeconds } from "./playlength"
 
 const OPTION_KEYS = ["showPPCounter", "showHitErrorMeter", "showResultScreen", "showDanserLogo", "loadVideo", "loadStoryboard", "inGameBGDim", "cursorSize"] as const
 
@@ -70,7 +71,7 @@ function freeBytes(dir: string): number {
 }
 
 /** The wire shape of one render: the o!rdr fields plus this worker's extras. */
-function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: number | undefined; typical: Typical }): Record<string, unknown> {
+function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: number | undefined; basis: "measured" | "assumed" }): Record<string, unknown> {
     const playable = record.status === "done" && !record.removed && record.videoFile !== null
     return {
         renderID: record.renderID,
@@ -98,7 +99,7 @@ function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: num
         finishedAt: record.finishedAt,
         // One estimate over the whole shared queue, so every site prints the same number.
         etaSeconds: eta && eta.seconds !== undefined ? eta.seconds : null,
-        etaBasis: eta && eta.seconds !== undefined ? eta.typical.basis : null
+        etaBasis: eta && eta.seconds !== undefined ? eta.basis : null
     }
 }
 
@@ -204,8 +205,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
     /** Every render's wire shape, with the shared ETA computed once for the batch. */
     const withEta = (records: RenderRecord[]) => {
         const typical = typicalDuration(journal)
-        const eta = etaByRender(journal, scheduler.slotCount, typical)
-        return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), typical }))
+        const model = renderModel(journal)
+        const now = Date.now()
+        const eta = etaByRender(journal, scheduler.slotCount, typical, now, model)
+        return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), basis: etaBasisFor(r, model, typical, now) }))
     }
 
     const submit = async (req: http.IncomingMessage, caller: Caller): Promise<{ renderID: number; window: RenderWindow | null }> => {
@@ -245,6 +248,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             if (header.mods & MOD_AUTOPLAY) throw new HttpError(400, 11, "autoplay replays cannot be rendered")
             if (header.frameBytes === 0) throw new HttpError(400, 7, "the replay carries no input data")
         }
+        // Read before the checks below, so nothing awaits between them and journal.create.
+        const play = header ? await replayPlaySeconds(sub.replay, header, win.window) : null
         const formMd5 = (f.beatmapMd5 ?? "").trim().toLowerCase()
         const beatmapMd5 = header?.beatmapMd5 ?? (/^[0-9a-f]{32}$/.test(formMd5) ? formMd5 : null)
         if (header && formMd5 && formMd5 !== header.beatmapMd5) log(`submit: form beatmapMd5 ${formMd5} differs from the replay's ${header.beatmapMd5}; trusting the replay`)
@@ -283,7 +288,8 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             scoreId,
             beatmapsetId,
             beatmapMd5,
-            window: win.window
+            window: win.window,
+            playSeconds: play
         })
         try {
             fs.writeFileSync(replayPath(cfg, record.renderID), sub.replay)
@@ -291,7 +297,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             journal.update(record.renderID, { status: "failed", progress: "Failed", errorCode: 21, errorMessage: `could not store the replay: ${(err as Error).message}`, finishedAt: new Date().toISOString() })
             throw new HttpError(500, 21, `could not store the replay: ${(err as Error).message}`)
         }
-        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, server ${server}, source ${record.source || "-"}, score ${scoreId ?? "-"}${win.window ? `, window ${win.window.start}-${win.window.end}s` : ""})`)
+        log(`render ${record.renderID} queued: ${record.replayUsername} on set ${beatmapsetId} (${resolution}, skin ${skin}, server ${server}, source ${record.source || "-"}, score ${scoreId ?? "-"}${win.window ? `, window ${win.window.start}-${win.window.end}s` : ""}${play !== null ? `, ${play}s of play` : ""})`)
         scheduler.tick()
         return { renderID: record.renderID, window: record.window }
     }

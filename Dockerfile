@@ -13,11 +13,13 @@ ARG DANSER_VERSION=0.11.0
 # sha256 of danser-0.11.0-linux.zip as published on GitHub releases (observed 2026-09-08).
 ARG DANSER_SHA256=c3184ceb84b20e8e9c9a2709113efc29b8bdf2f866949834d7fb8e799618a67e
 ENV DEBIAN_FRONTEND=noninteractive
+# xz-utils: decompresses a submitted replay's LZMA frame block to read its play length
+# (src/playlength.ts); bookworm's 5.4.1 predates the 2024 backdoored 5.6.x releases.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb xauth xfonts-base x11-xserver-utils \
         libgl1 libgl1-mesa-dri libglx-mesa0 libegl1 \
         libx11-6 libxcursor1 libxrandr2 libxinerama1 libxi6 libxxf86vm1 libasound2 libgtk-3-0 \
-        fonts-dejavu fonts-noto-cjk ca-certificates curl unzip ffmpeg \
+        fonts-dejavu fonts-noto-cjk ca-certificates curl unzip ffmpeg xz-utils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # danser-go is fetched ONCE, here, and pinned by hash; the worker never downloads anything at runtime.

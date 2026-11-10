@@ -12,6 +12,8 @@ export type ReplayHeader = {
     mods: number
     timestamp: bigint
     frameBytes: number
+    /** Where the LZMA frame block starts in the file (it is frameBytes long). */
+    frameOffset: number
 }
 
 export const MOD_AUTOPLAY = 1 << 11
@@ -28,6 +30,11 @@ export class ReplayParseError extends Error {
 class Reader {
     private offset = 0
     constructor(private readonly buf: Buffer) {}
+
+    /** Bytes read so far. */
+    get position(): number {
+        return this.offset
+    }
 
     private need(n: number): void {
         if (this.offset + n > this.buf.length) throw new ReplayParseError("replay header is truncated", 5)
@@ -93,7 +100,8 @@ export function parseReplayHeader(buf: Buffer): ReplayHeader {
     r.str() // life bar graph
     const timestamp = r.i64()
     const frameBytes = r.u32()
+    const frameOffset = r.position
     if (mode > 3) throw new ReplayParseError(`unknown ruleset byte ${mode}`, 2)
     if (!/^[0-9a-f]{32}$/i.test(beatmapMd5)) throw new ReplayParseError("replay carries no beatmap md5", 2)
-    return { mode, version, beatmapMd5: beatmapMd5.toLowerCase(), playerName, replayMd5, mods, timestamp, frameBytes }
+    return { mode, version, beatmapMd5: beatmapMd5.toLowerCase(), playerName, replayMd5, mods, timestamp, frameBytes, frameOffset }
 }

@@ -71,12 +71,18 @@ estimate is computed here, once, over every job. A running job that danser has
 drawn at least 5% of is projected from its own speed: the time it took to draw
 what it last reported, scaled to the rest, plus a few seconds to finish the file,
 counted down from that report (the journal keeps `drawStartedAt` and `progressAt`
-for this). Before that, and for every queued job, the guess is the median length
-of the last 20 finished renders from any server (210 s, `assumed`, until one
-finishes); queued jobs are handed to the earliest free slot in order. Render
-length follows play length (6 s to 330 s on the live journal), so the median is
-only a placeholder until danser's first report. A player on either site and staff
-on both admin panels read the same position and the same estimate.
+for this). Before that, and for every queued job, the guess comes from the job's
+own play length: at submit the replay's LZMA frame block is decompressed with xz
+(xz-utils in the image, output capped at 32 MB, 10 s limit) and its frame times
+summed into `playSeconds` (song time clipped to the window, divided by 1.5 for
+DT/NC or 0.75 for HT). Expected length = preparation + drawing seconds per second
+of play x `playSeconds`, both medians over the last renders that recorded them
+(`assumed` 10 s and 1.2x, the Backup node's numbers, until three have). A job
+with no readable frames falls back to the median length of the last 20 finished
+renders (210 s, `assumed`, until one finishes). Queued jobs are handed to the
+earliest free slot in order. `etaBasis` says what the job's own estimate rests on.
+A player on either site and staff on both admin panels read the same position and
+the same estimate.
 
 ### Scoped keys (one server only)
 
