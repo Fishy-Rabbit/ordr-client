@@ -24,6 +24,10 @@ async function main(): Promise<void> {
     else if (defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin)) log(`default skin: ${cfg.defaultSkin} (${cfg.skinsDir}/${cfg.defaultSkin})`)
     else log(`WARNING: RENDER_DEFAULT_SKIN=${cfg.defaultSkin} but ${path.join(cfg.skinsDir, cfg.defaultSkin)} is not a folder; \`default\` renders with danser's built-in skin until it exists`)
 
+    // Names only: the digests are not secret, but nothing about a key belongs in a log.
+    const scoped = [...new Set(cfg.scopedKeys.map(k => k.server))]
+    log(`scoped keys: ${scoped.length ? `${scoped.join(", ")} (at most ${cfg.scopedMaxActive} active jobs each)` : "none"}`)
+    log(`free-disk floor: ${cfg.minFreeBytes > 0 ? `${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB under ${cfg.videosDir}` : "off"}`)
     const journal = new Journal(cfg.stateDir)
     journal.load()
     log(`journal: ${journal.all().length} render(s) on record`)

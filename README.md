@@ -42,7 +42,8 @@ redirects are followed only when they stay on a hinai mirror host, so a mirror
 running in redirect mode can never hand this worker a third-party URL. If the
 hinai mirror does not have a set, the render fails with code 8.
 
-Every route except `GET /health` requires the header `X-Render-Key: <RENDER_API_KEY>`.
+Every route except `GET /health` requires the header `X-Render-Key`, carrying either the staff
+key (`RENDER_API_KEY`) or a scoped key (`RENDER_SCOPED_KEYS`, see "Scoped keys" below).
 
 | Method | Path | Notes |
 |---|---|---|
@@ -72,6 +73,39 @@ the running jobs' remaining time read from their progress and the queued jobs
 handed to the earliest free slot in order. So a player on either site and staff
 on both admin panels read the same position and the same estimate.
 
+### Scoped keys (one server only)
+
+A scoped key acts for ONE server. It exists so a public site (the hinai beatmap page, through
+the hinai mirror) can make videos without holding the staff key that fishy and kawata use.
+With a scoped key:
+
+- `POST /renders` queues under the key's server, whatever `source` says. Naming another
+  `server` is refused with `403`. The server may hold at most `RENDER_SCOPED_MAX_ACTIVE` jobs
+  (queued + rendering) at once; past that the answer is `503` / code 40, like a full queue.
+- `GET /renders`, `GET /renders?renderID=N`, `GET /queue` and `GET /videos/N.mp4` show only
+  that server's renders. Another server's render looks like one that does not exist (an empty
+  list, `404`). `/queue` keeps its totals and `servers` counts, which `/health` publishes anyway.
+- `GET /skins` and `GET /health` answer as usual.
+
+The worker never sees a scoped key itself, only its SHA-256, so `RENDER_SCOPED_KEYS` is not a
+credential. Make a key and its entry like this (the key goes to the client's secret store, the
+digest to the worker):
+
+```bash
+key=$(openssl rand -hex 32)
+printf 'hinai=%s\n' "$(printf %s "$key" | sha256sum | cut -d' ' -f1)"
+```
+
+To rotate, add the new digest next to the old one (two entries for one server are allowed),
+restart, switch the client to the new key, then remove the old entry.
+
+### Free-disk floor
+
+With `RENDER_MIN_FREE_GB` set, `POST /renders` answers `503` / code 43 for every key while the
+filesystem holding `VIDEOS_DIR` has less free space than that. Jobs already queued still run.
+It exists because the videos share a disk with other data (on the Backup node: the nightly
+backups), and a public site can ask for videos faster than the 30-day sweep removes them.
+
 ### Windowed renders (`start`, `end`)
 
 `POST /renders` takes two optional fields, `start` and `end`: whole seconds of
@@ -95,7 +129,10 @@ an active render from the same server answers code 29.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RENDER_API_KEY` | (none) | Required unless `RENDER_FAKE=1`; the worker refuses to start without it. |
+| `RENDER_API_KEY` | (none) | The staff key: every route, every server. Required unless `RENDER_FAKE=1`; the worker refuses to start without it. |
+| `RENDER_SCOPED_KEYS` | unset | `server=<sha256 hex of the key>` entries, separated by commas or spaces: keys that act for one server only (see "Scoped keys"). A malformed entry refuses the boot. |
+| `RENDER_SCOPED_MAX_ACTIVE` | `10` | Most queued + rendering jobs one scoped key's server may hold. |
+| `RENDER_MIN_FREE_GB` | `0` (off) | Refuse new renders (503 / code 43) while `VIDEOS_DIR`'s filesystem has less free space than this. |
 | `PORT` | `3002` | |
 | `RENDER_CONCURRENCY` | `2` | Render slots; each gets its own Xvfb display (`:10`, `:11`, ...) and working dir. |
 | `RENDER_THREADS_PER_SLOT` | `4` | `LP_NUM_THREADS` for llvmpipe in each slot. |

@@ -14,7 +14,8 @@ export const FALLBACK_RENDER_SECONDS = 210
 /** How many finished renders the typical duration is taken over. */
 const DURATION_SAMPLE = 20
 
-const SERVER_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
+/** A valid server name: lower-case, digits and dashes, at most 32 characters. */
+export const SERVER_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
 
 /**
  * The server a job belongs to: the explicit `server` field when it is a valid

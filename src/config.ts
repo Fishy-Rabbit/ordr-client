@@ -1,4 +1,5 @@
 import path from "path"
+import { SERVER_NAME } from "./fleet"
 
 export const VERSION = "1.0.0"
 
@@ -16,9 +17,19 @@ export const PRESETS: Record<string, Preset> = {
 }
 export const DEFAULT_RESOLUTION = "1280x720"
 
+/** One scoped key: it acts for `server` only. The key itself never reaches this process, only its SHA-256. */
+export type ScopedKey = { server: string; hash: Buffer }
+
 export type Config = {
     port: number
+    /** The staff key: every route, every server's jobs. */
     apiKey: string
+    /** Keys that act for ONE server (RENDER_SCOPED_KEYS); see parseScopedKeys. */
+    scopedKeys: ScopedKey[]
+    /** Most queued + rendering jobs a scoped key's server may hold at once (RENDER_SCOPED_MAX_ACTIVE). */
+    scopedMaxActive: number
+    /** New renders are refused while the videos filesystem has less free space than this; 0 = no floor. */
+    minFreeBytes: number
     fake: boolean
     concurrency: number
     threadsPerSlot: number
@@ -85,6 +96,29 @@ export function isHinaiMirrorUrl(url: string): boolean {
     return HINAI_MIRROR_HOSTS.has(host)
 }
 
+/**
+ * `RENDER_SCOPED_KEYS`: entries `server=<sha256 hex of the key>`, separated by commas or
+ * whitespace. A request whose X-Render-Key hashes to one of these acts for that server ONLY:
+ * it queues under that server's name and sees only that server's renders, queue jobs and
+ * videos (server.ts). The hinai beatmap mirror holds one; the staff panels keep the full
+ * RENDER_API_KEY. Only digests live here, so this value is not a credential. One server may
+ * have two entries while a key is rotated. A malformed entry refuses the boot rather than
+ * silently dropping a key.
+ */
+export function parseScopedKeys(raw: string): ScopedKey[] {
+    const out: ScopedKey[] = []
+    for (const entry of raw.split(/[\s,]+/).filter(Boolean)) {
+        const eq = entry.indexOf("=")
+        const server = eq > 0 ? entry.slice(0, eq) : ""
+        const hex = eq > 0 ? entry.slice(eq + 1).toLowerCase() : ""
+        if (!SERVER_NAME.test(server) || !/^[0-9a-f]{64}$/.test(hex)) {
+            throw new Error(`RENDER_SCOPED_KEYS: every entry must be server=<64 hex chars, the SHA-256 of the key>; got an entry for ${JSON.stringify(server || entry.slice(0, 12))}`)
+        }
+        out.push({ server, hash: Buffer.from(hex, "hex") })
+    }
+    return out
+}
+
 function flag(name: string): boolean {
     const raw = (process.env[name] ?? "").trim().toLowerCase()
     return raw === "1" || raw === "true" || raw === "yes" || raw === "on"
@@ -101,6 +135,9 @@ export function loadConfig(): Config {
     const cfg: Config = {
         port: num("PORT", 3002),
         apiKey: str("RENDER_API_KEY", ""),
+        scopedKeys: parseScopedKeys(str("RENDER_SCOPED_KEYS", "")),
+        scopedMaxActive: Math.max(1, Math.floor(num("RENDER_SCOPED_MAX_ACTIVE", 10))),
+        minFreeBytes: Math.max(0, num("RENDER_MIN_FREE_GB", 0)) * 1024 ** 3,
         fake: flag("RENDER_FAKE"),
         concurrency: Math.max(1, Math.floor(num("RENDER_CONCURRENCY", 2))),
         threadsPerSlot: Math.max(1, Math.floor(num("RENDER_THREADS_PER_SLOT", 4))),

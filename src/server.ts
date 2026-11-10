@@ -38,6 +38,37 @@ function keyMatches(expected: string, given: string | undefined): boolean {
     return crypto.timingSafeEqual(a, b)
 }
 
+/**
+ * Who a request acts for. The staff key (RENDER_API_KEY) acts for every server; a scoped key
+ * (RENDER_SCOPED_KEYS) for one: it queues under that server's name and sees only that
+ * server's renders, queue jobs and videos. Another server's render looks exactly like one
+ * that does not exist (404 / empty list), so a scoped key cannot even confirm it is there.
+ */
+type Caller = { staff: true } | { staff: false; server: string }
+
+const STAFF: Caller = { staff: true }
+
+/** The caller a key identifies, or null when it is no key at all. Every scoped digest is compared (no early exit). */
+function identify(cfg: Config, given: string | undefined): Caller | null {
+    if (!given) return null
+    if (keyMatches(cfg.apiKey, given)) return STAFF
+    const digest = crypto.createHash("sha256").update(given).digest()
+    let server: string | null = null
+    for (const k of cfg.scopedKeys ?? []) if (crypto.timingSafeEqual(k.hash, digest) && server === null) server = k.server
+    return server === null ? null : { staff: false, server }
+}
+
+/** True when this caller may see this render. */
+function canSee(caller: Caller, record: RenderRecord): boolean {
+    return caller.staff || record.server === caller.server
+}
+
+/** Free bytes for an unprivileged writer on the filesystem holding `dir`. */
+function freeBytes(dir: string): number {
+    const st = fs.statfsSync(dir)
+    return st.bavail * st.bsize
+}
+
 /** The wire shape of one render: the o!rdr fields plus this worker's extras. */
 function toApi(record: RenderRecord, queuePosition: number, eta?: { seconds: number | undefined; typical: Typical }): Record<string, unknown> {
     const playable = record.status === "done" && !record.removed && record.videoFile !== null
@@ -144,12 +175,19 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         }
     }
 
-    /** The shared queue for staff on every site: active jobs (rendering, then FIFO) plus the latest finished ones. */
-    const queueView = (recentLimit: number) => {
+    /**
+     * The shared queue for staff on every site: active jobs (rendering, then FIFO) plus the
+     * latest finished ones. A scoped caller gets only its own server's jobs; the totals and
+     * per-server counts stay whole (GET /health publishes them anyway, and the hinai mirror's
+     * line cap reads `servers`).
+     */
+    const queueView = (recentLimit: number, caller: Caller) => {
         const counts = journal.counts()
         const typical = typicalDuration(journal)
         const eta = etaByRender(journal, scheduler.slotCount, typical)
-        const active = journal.all().filter(r => r.status === "rendering").concat(journal.queued())
+        const mine = (r: RenderRecord) => canSee(caller, r)
+        const active = journal.all().filter(r => r.status === "rendering").concat(journal.queued()).filter(mine)
+        const recent = caller.staff ? journal.recentFinished(recentLimit) : journal.recentFinished(Number.MAX_SAFE_INTEGER).filter(mine).slice(0, recentLimit)
         return {
             slots: scheduler.slotCount,
             maxQueue: cfg.maxQueue,
@@ -159,7 +197,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             typicalBasis: typical.basis,
             servers: serverCounts(journal),
             jobs: active.map(r => toQueueJob(r, scheduler.queuePosition(r), eta.get(r.renderID))),
-            recent: journal.recentFinished(recentLimit).map(r => toQueueJob(r, 0, undefined))
+            recent: recent.map(r => toQueueJob(r, 0, undefined))
         }
     }
 
@@ -170,7 +208,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), typical }))
     }
 
-    const submit = async (req: http.IncomingMessage): Promise<{ renderID: number; window: RenderWindow | null }> => {
+    const submit = async (req: http.IncomingMessage, caller: Caller): Promise<{ renderID: number; window: RenderWindow | null }> => {
         const sub = await readMultipart(req, cfg.maxReplayBytes)
         if (sub.truncated) throw new HttpError(413, 5, `the replay is larger than the ${Math.round(cfg.maxReplayBytes / 1048576)} MB limit`)
         if (!sub.replay || sub.replay.length === 0) throw new HttpError(400, 2, "missing replayFile")
@@ -212,10 +250,26 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         if (header && formMd5 && formMd5 !== header.beatmapMd5) log(`submit: form beatmapMd5 ${formMd5} differs from the replay's ${header.beatmapMd5}; trusting the replay`)
 
         const source = (f.source ?? "").trim().slice(0, 64)
-        const server = serverFor(f.server, source)
+        // A scoped key decides the server; naming another one is refused, not rewritten.
+        const asked = (f.server ?? "").trim().toLowerCase()
+        if (!caller.staff && asked !== "" && asked !== caller.server) throw new HttpError(403, 403, `this key may only queue ${caller.server} renders`)
+        const server = caller.staff ? serverFor(f.server, source) : caller.server
         const scoreId = (f.scoreId ?? "").trim() || null
         if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
         if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
+        if (!caller.staff) {
+            const held = journal.all().filter(r => r.server === server && (r.status === "queued" || r.status === "rendering")).length
+            if (held >= cfg.scopedMaxActive) throw new HttpError(503, 40, `${server} already has ${held} renders in the line (the most it may hold); try again later`)
+        }
+        // The videos live on a disk other data shares (on the Backup node: the nightly
+        // backups), so below the floor nothing new is accepted. Jobs already queued still run.
+        if (cfg.minFreeBytes > 0) {
+            const free = freeBytes(cfg.videosDir)
+            if (free < cfg.minFreeBytes) {
+                log(`submit refused: ${Math.floor(free / 1024 ** 3)} GB free under ${cfg.videosDir}, the floor is ${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB (RENDER_MIN_FREE_GB)`)
+                throw new HttpError(503, 43, "the renderer is low on disk space; try again later")
+            }
+        }
 
         const record = journal.create({
             replayUsername: header?.playerName || (f.username ?? "").trim() || "unknown",
@@ -242,10 +296,10 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return { renderID: record.renderID, window: record.window }
     }
 
-    const serveVideo = (req: http.IncomingMessage, res: http.ServerResponse, name: string): void => {
+    const serveVideo = (req: http.IncomingMessage, res: http.ServerResponse, name: string, caller: Caller): void => {
         const match = name.match(/^(?:render)?(\d+)\.mp4$/)
         const record = match ? journal.get(Number(match[1])) : undefined
-        if (!record || record.status !== "done" || record.removed || !record.videoFile || !fs.existsSync(record.videoFile)) {
+        if (!record || !canSee(caller, record) || record.status !== "done" || record.removed || !record.videoFile || !fs.existsSync(record.videoFile)) {
             throw new HttpError(404, 404, "no such video")
         }
         const size = fs.statSync(record.videoFile).size
@@ -292,32 +346,35 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
 
         if (route === "/health" && (method === "GET" || method === "HEAD")) return sendJson(res, 200, health())
 
+        let caller: Caller = STAFF
         if (!cfg.fake || cfg.apiKey) {
             const given = req.headers["x-render-key"]
-            if (!keyMatches(cfg.apiKey, Array.isArray(given) ? given[0] : given)) throw new HttpError(401, 401, "missing or invalid X-Render-Key")
+            const who = identify(cfg, Array.isArray(given) ? given[0] : given)
+            if (!who) throw new HttpError(401, 401, "missing or invalid X-Render-Key")
+            caller = who
         }
 
         if (route === "/renders" && method === "POST") {
-            const { renderID, window } = await submit(req)
+            const { renderID, window } = await submit(req, caller)
             return sendJson(res, 201, { message: "Render queued", renderID, errorCode: 0, window })
         }
         if (route === "/renders" && method === "GET") {
             const raw = url.searchParams.get("renderID")
             if (raw !== null && raw !== "") {
                 const record = journal.get(Number(raw))
-                const renders = record ? withEta([record]) : []
+                const renders = record && canSee(caller, record) ? withEta([record]) : []
                 return sendJson(res, 200, { renders, maxRenders: renders.length })
             }
-            const renders = withEta(journal.latest(50))
+            const renders = withEta(caller.staff ? journal.latest(50) : journal.all().filter(r => canSee(caller, r)).slice(-50).reverse())
             return sendJson(res, 200, { renders, maxRenders: renders.length })
         }
         if (route === "/queue" && method === "GET") {
             const asked = Number(url.searchParams.get("recent") ?? 25)
             const recent = Number.isFinite(asked) ? Math.max(0, Math.min(100, Math.floor(asked))) : 25
-            return sendJson(res, 200, queueView(recent))
+            return sendJson(res, 200, queueView(recent, caller))
         }
         if (route === "/skins" && method === "GET") return sendJson(res, 200, { skins: listSkins(cfg.skinsDir, cfg.defaultSkin), default: defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin) })
-        if (route.startsWith("/videos/") && (method === "GET" || method === "HEAD")) return serveVideo(req, res, path.posix.basename(route))
+        if (route.startsWith("/videos/") && (method === "GET" || method === "HEAD")) return serveVideo(req, res, path.posix.basename(route), caller)
         throw new HttpError(404, 404, "not found")
     }
 
