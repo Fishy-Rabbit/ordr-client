@@ -237,7 +237,7 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         log(`render ${id} failed (${errorCode}): ${errorMessage.split("\n")[0]}`)
     }
 
-    journal.update(id, { status: "rendering", progress: "Rendering (preparing)", startedAt: new Date().toISOString(), slot: slot.index })
+    journal.update(id, { status: "rendering", progress: "Rendering (preparing)", startedAt: new Date().toISOString(), drawStartedAt: null, progressAt: null, slot: slot.index })
     log(`render ${id} starting on slot ${slot.index} (${record.resolution}, skin ${record.skin}${record.window ? `, window ${record.window.start}-${record.window.end}s` : ""})`)
 
     if (!fs.existsSync(osr)) return finishFail(5, "the replay file is no longer on disk")
@@ -284,7 +284,8 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         timeoutMs: cfg.timeoutMs,
         stallMs: cfg.stallMs,
         debug: cfg.debug,
-        onProgress: progress => journal.update(id, { progress }),
+        onProgress: progress => journal.progress(id, progress),
+        onDrawStart: () => journal.update(id, { drawStartedAt: new Date().toISOString() }),
         log
     })
     register(run)

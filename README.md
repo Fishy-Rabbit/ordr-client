@@ -67,10 +67,15 @@ fishy and kawata send their renders to this one worker, so it is one queue: the
 slots, the FIFO order and the 20-job cap are shared. Each job records its
 `server`. The duplicate check is per server, because the two servers' score ids
 overlap; one score id from both servers is two different plays. The wait
-estimate is computed here, once, over every job: the median length of the last
-20 finished renders from any server (210 s, `assumed`, until one finishes), with
-the running jobs' remaining time read from their progress and the queued jobs
-handed to the earliest free slot in order. So a player on either site and staff
+estimate is computed here, once, over every job. A running job that danser has
+drawn at least 5% of is projected from its own speed: the time it took to draw
+what it last reported, scaled to the rest, plus a few seconds to finish the file,
+counted down from that report (the journal keeps `drawStartedAt` and `progressAt`
+for this). Before that, and for every queued job, the guess is the median length
+of the last 20 finished renders from any server (210 s, `assumed`, until one
+finishes); queued jobs are handed to the earliest free slot in order. Render
+length follows play length (6 s to 330 s on the live journal), so the median is
+only a placeholder until danser's first report. A player on either site and staff
 on both admin panels read the same position and the same estimate.
 
 ### Scoped keys (one server only)

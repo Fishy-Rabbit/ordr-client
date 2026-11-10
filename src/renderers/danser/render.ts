@@ -26,6 +26,8 @@ export type DanserRunArgs = {
     stallMs: number
     debug: boolean
     onProgress: (progress: string) => void
+    /** Called once, when danser starts drawing frames (after its pp pre-pass). */
+    onDrawStart?: () => void
     log: (line: string) => void
 }
 
@@ -114,7 +116,10 @@ export class DanserRun {
 
                 if (stream === "stdout") {
                     // Progress lines before "Starting encoding" belong to the pp pre-pass.
-                    if (line.includes("Starting encoding")) canGetProgress = true
+                    if (line.includes("Starting encoding") && !canGetProgress) {
+                        canGetProgress = true
+                        a.onDrawStart?.()
+                    }
                     if (canGetProgress && line.includes("Progress")) {
                         const match = line.match(/(\d+)%/)
                         if (match) {

@@ -1,6 +1,6 @@
 import fs from "fs"
 import path from "path"
-import { serverFor } from "./fleet"
+import { progressPercent, serverFor } from "./fleet"
 import type { RenderWindow } from "./window"
 
 export type RenderStatus = "queued" | "rendering" | "done" | "failed"
@@ -33,6 +33,10 @@ export type RenderRecord = {
     removed: boolean
     startedAt: string | null
     finishedAt: string | null
+    /** When danser began drawing frames ("Starting encoding"); null before that. The ETA projects from it. */
+    drawStartedAt: string | null
+    /** When the progress percentage last changed; null until the first one. */
+    progressAt: string | null
     slot: number | null
 }
 
@@ -66,6 +70,9 @@ export class Journal {
             if (!r.server) r.server = serverFor(undefined, r.source ?? "")
             // Records written before windowed renders carry no window: they were full renders.
             if (r.window === undefined) r.window = null
+            // Records written before the projected ETA (2026-11-10) carry no draw timestamps.
+            if (r.drawStartedAt === undefined) r.drawStartedAt = null
+            if (r.progressAt === undefined) r.progressAt = null
             this.byId.set(r.renderID, r)
             if (r.renderID > maxId) maxId = r.renderID
         }
@@ -106,6 +113,8 @@ export class Journal {
             removed: false,
             startedAt: null,
             finishedAt: null,
+            drawStartedAt: null,
+            progressAt: null,
             slot: null,
             date: new Date().toISOString(),
             ...fields,
@@ -135,6 +144,20 @@ export class Journal {
         if (progressOnly) this.scheduleFlush()
         else this.flush()
         return record
+    }
+
+    /**
+     * A progress tick from the renderer, written lazily like any tick. A new percentage
+     * stamps progressAt: the ETA projects the job's own drawing speed from the moment
+     * each percentage arrived (fleet.ts projectedSecondsLeft).
+     */
+    progress(id: number, text: string, now: Date = new Date()): void {
+        const record = this.byId.get(id)
+        if (!record) return
+        const pct = progressPercent(text)
+        if (pct !== null && pct !== progressPercent(record.progress)) record.progressAt = now.toISOString()
+        record.progress = text
+        this.scheduleFlush()
     }
 
     /** Queued renders in submission order (ids are monotonic, so this is FIFO). */

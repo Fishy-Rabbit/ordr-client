@@ -56,8 +56,42 @@ export function typicalDuration(journal: Journal): Typical {
     return { seconds: Math.round(median), basis: "measured" }
 }
 
-/** Seconds a rendering job still needs: from its percentage, else from how long it has run. */
+/**
+ * Seconds from danser's 100% to the finished file (muxing, the move out of the slot).
+ * Measured 3 s on a full 261 s render on the Backup node, 2026-11-10; 5 leaves a margin.
+ */
+export const FINALIZE_SECONDS = 5
+
+/** danser reports every 5%; below that too little is drawn to trust the speed. */
+const MIN_PROJECT_PERCENT = 5
+
+/**
+ * Seconds a drawing job still needs, from its OWN speed: the time it took to draw the
+ * percentage it last reported, scaled to the rest, counted down from that report. Null
+ * when there is no draw start, no fresh percentage, or too little drawn yet.
+ *
+ * A render's length follows the play's length (6 s to 330 s on the live journal), so
+ * the median render length says nothing about this one; until 2026-11-10 the estimate
+ * used it and read "about 5 seconds left" for minutes on long maps.
+ */
+export function projectedSecondsLeft(record: RenderRecord, now: number = Date.now()): number | null {
+    const pct = progressPercent(record.progress)
+    if (pct === null || pct < MIN_PROJECT_PERCENT || pct >= 100) return null
+    const drawStart = record.drawStartedAt ? Date.parse(record.drawStartedAt) : NaN
+    const tick = record.progressAt ? Date.parse(record.progressAt) : NaN
+    if (!Number.isFinite(drawStart) || !Number.isFinite(tick) || tick <= drawStart) return null
+    const drawn = (tick - drawStart) / 1000
+    const leftAtTick = (drawn * (100 - pct)) / pct + FINALIZE_SECONDS
+    return Math.max(5, Math.round(leftAtTick - (now - tick) / 1000))
+}
+
+/**
+ * Seconds a rendering job still needs: projected from its own drawing speed when it has
+ * one, else its share of a typical render, else a typical render less the time it has run.
+ */
 function remainingFor(record: RenderRecord, typical: number, now: number): number {
+    const projected = projectedSecondsLeft(record, now)
+    if (projected !== null) return projected
     const pct = progressPercent(record.progress)
     if (pct !== null) return Math.max(5, Math.round((typical * (100 - pct)) / 100))
     const started = record.startedAt ? Date.parse(record.startedAt) : NaN
@@ -74,7 +108,7 @@ function insertSorted(list: number[], value: number): void {
 
 /**
  * Seconds until each active job is done, simulated over the worker's slots.
- * Running jobs need what is left of a typical render; queued jobs then take
+ * Running jobs need what remainingFor says is left; queued jobs then take
  * the earliest free slot in FIFO order, one typical render each, which is
  * exactly how the scheduler hands them out.
  */
