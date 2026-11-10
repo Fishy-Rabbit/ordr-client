@@ -36,6 +36,8 @@ export type Config = {
     timeoutMs: number
     stallMs: number
     retentionDays: number
+    /** Cached .osz sets nobody used for this many days are deleted by the daily sweep. */
+    songCacheDays: number
     maxQueue: number
     maxReplayBytes: number
     mirrorBase: string
@@ -144,6 +146,7 @@ export function loadConfig(): Config {
         timeoutMs: Math.max(1, num("RENDER_TIMEOUT_MIN", 90)) * 60_000,
         stallMs: Math.max(30, num("RENDER_STALL_SEC", 90)) * 1000,
         retentionDays: Math.max(1, num("RENDER_RETENTION_DAYS", 30)),
+        songCacheDays: Math.max(1, num("RENDER_SONG_CACHE_DAYS", 30)),
         maxQueue: Math.max(1, Math.floor(num("RENDER_MAX_QUEUE", 20))),
         maxReplayBytes: Math.max(1, num("RENDER_MAX_REPLAY_MB", 16)) * 1024 * 1024,
         mirrorBase: str("MIRROR_BASE", "http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100").replace(/\/+$/, ""),

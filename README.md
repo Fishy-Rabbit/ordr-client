@@ -106,6 +106,15 @@ filesystem holding `VIDEOS_DIR` has less free space than that. Jobs already queu
 It exists because the videos share a disk with other data (on the Backup node: the nightly
 backups), and a public site can ask for videos faster than the 30-day sweep removes them.
 
+### Map cache
+
+`SONGS_DIR` keeps one `<setId>.osz` per set, fetched from the mirror the first time it is
+rendered. The sweep that removes old videos (at boot, then daily) also deletes sets nobody used
+for `RENDER_SONG_CACHE_DAYS`. A set is kept while its file was used inside the window (a cache
+hit refreshes its mtime), while a render in the journal asked for it inside the window, or while
+a render for it is still queued or rendering. Leftover `.osz.part` downloads older than a day go
+too. A deleted set costs one download from the mirror the next time it is rendered.
+
 ### Windowed renders (`start`, `end`)
 
 `POST /renders` takes two optional fields, `start` and `end`: whole seconds of
@@ -139,6 +148,7 @@ an active render from the same server answers code 29.
 | `RENDER_TIMEOUT_MIN` | `90` | A render past this is killed and marked failed (code 21). |
 | `RENDER_STALL_SEC` | `90` | No output growth for this long is treated as a wedged danser. |
 | `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`). |
+| `RENDER_SONG_CACHE_DAYS` | `30` | Cached `.osz` sets nobody used for this long are deleted by the same sweep (see "Map cache"). |
 | `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
 | `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |
 | `MIRROR_BASE` | `http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100` | The beatmap mirror. |

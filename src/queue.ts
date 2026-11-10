@@ -5,13 +5,15 @@ import { Json } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
 import { runRenderJob, SHUTDOWN_ABORT, SlotPaths } from "./job"
 import { runFakeJob } from "./fake"
+import { sweepSongCache } from "./songcache"
 
 type Active = { renderID: number; run: DanserRun | null }
 
 /**
  * FIFO over the journal: every free slot takes the oldest queued render.
  * Renders interrupted by a restart go back to the queue; finished videos
- * older than the retention window are swept once a day.
+ * older than the retention window, and cached maps nobody used for the
+ * song-cache window, are swept at boot and once a day.
  */
 export class Scheduler {
     private active = new Map<number, Active>()
@@ -73,7 +75,7 @@ export class Scheduler {
         }
     }
 
-    /** Delete videos past the retention window and mark their records removed. */
+    /** Delete videos past the retention window (marking their records removed) and unused cached maps. */
     sweep(): void {
         const cutoff = Date.now() - this.cfg.retentionDays * 24 * 60 * 60 * 1000
         let swept = 0
@@ -86,6 +88,8 @@ export class Scheduler {
             swept++
         }
         if (swept) this.log(`retention sweep removed ${swept} video(s) older than ${this.cfg.retentionDays} days`)
+        const songs = sweepSongCache(this.cfg.songsDir, this.journal, this.cfg.songCacheDays)
+        if (songs.removed) this.log(`song cache sweep removed ${songs.removed} set(s), ${Math.round(songs.bytes / 1048576)} MB, unused for ${this.cfg.songCacheDays} days; ${songs.kept} kept`)
     }
 
     stop(): void {

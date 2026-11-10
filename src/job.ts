@@ -10,6 +10,7 @@ import { Journal, RenderRecord } from "./journal"
 import { buildDanserSettings, DEFAULT_OPTIONS, Json, RenderOptions, writeSlotSettings } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
 import { windowedOptions } from "./window"
+import { touchSong } from "./songcache"
 
 export type SlotPaths = { index: number; display: string; root: string; danserDir: string; songsDir: string; videosDir: string }
 
@@ -147,10 +148,16 @@ async function fetchFromMirror(cfg: Config, url: string): Promise<Response> {
 
 type OszResult = { ok: true; path: string } | { ok: false; message: string }
 
-/** The .osz for a set, from the songs cache or fetched from the mirror by set id. */
-async function ensureOsz(cfg: Config, setId: number, log: (line: string) => void): Promise<OszResult> {
+/**
+ * The .osz for a set, from the songs cache or fetched from the mirror by set id. A cache hit
+ * refreshes the file's mtime, the "last used" clock the daily cache sweep reads (songcache.ts).
+ */
+export async function ensureOsz(cfg: Config, setId: number, log: (line: string) => void): Promise<OszResult> {
     const dest = path.join(cfg.songsDir, `${setId}.osz`)
-    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return { ok: true, path: dest }
+    if (fs.existsSync(dest) && fs.statSync(dest).size > 0) {
+        touchSong(dest)
+        return { ok: true, path: dest }
+    }
     const url = `${cfg.mirrorBase}${cfg.mirrorDownloadPath.replace("{id}", String(setId))}`
     log(`fetching set ${setId} from the mirror`)
     let res: Response
