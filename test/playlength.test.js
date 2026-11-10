@@ -67,6 +67,32 @@ test("framesEndMs sums the frame times, skipping the seed frame and anything mal
     assert.equal(framesEndMs("-12345|0|0|1"), null)
 })
 
+test("framesEndMs refuses totals no real play reaches (over 3 hours of song time)", () => {
+    assert.equal(framesEndMs("20000000|1|1|0"), null, "5.5 hours")
+    assert.equal(framesEndMs("10000000|1|1|0"), 10000000, "2.8 hours is long but possible")
+    assert.equal(framesEndMs("Infinity|1|1|0,10|1|1|0"), 10, "a non-finite delta is skipped")
+    assert.equal(framesEndMs("10|1|1,20|1|1|0"), 20, "a frame needs four fields")
+})
+
+test("at most two xz processes run at once; a third replay gets no length instead of waiting", { skip: !HAS_XZ && "xz is not installed here" }, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slowxz-"))
+    try {
+        const slow = path.join(dir, "xz")
+        fs.writeFileSync(slow, "#!/bin/sh\nsleep 1\nexec xz \"$@\"\n", { mode: 0o755 })
+        const buf = osr(FIXTURE)
+        const header = parseReplayHeader(buf)
+        const started = Date.now()
+        const runs = [1, 2, 3].map(() => replayPlaySeconds(buf, header, null, { xzPath: slow }))
+        const third = await runs[2]
+        assert.equal(third, null)
+        assert.ok(Date.now() - started < 900, "the third did not wait for a slot")
+        assert.deepEqual(await Promise.all(runs.slice(0, 2)), [30, 30])
+        assert.equal(await replayPlaySeconds(buf, header, null), 30, "slots are released afterwards")
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true })
+    }
+})
+
 test("playSeconds turns song time into video time: DT and NC speed it up, HT slows it, a window clips it", () => {
     assert.equal(playSeconds(30000, 0, null), 30)
     assert.equal(playSeconds(30000, 64, null), 20, "DT")

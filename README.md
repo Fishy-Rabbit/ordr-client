@@ -73,9 +73,10 @@ what it last reported, scaled to the rest, plus a few seconds to finish the file
 counted down from that report (the journal keeps `drawStartedAt` and `progressAt`
 for this). Before that, and for every queued job, the guess comes from the job's
 own play length: at submit the replay's LZMA frame block is decompressed with xz
-(xz-utils in the image, output capped at 32 MB, 10 s limit) and its frame times
-summed into `playSeconds` (song time clipped to the window, divided by 1.5 for
-DT/NC or 0.75 for HT). Expected length = preparation + drawing seconds per second
+(xz-utils in the image: output capped at 8 MB, 10 s limit, two at once, and only
+for submissions that pass the queue checks) and its frame times summed into
+`playSeconds`: song time clipped to the window, divided by 1.5 for DT/NC or
+0.75 for HT, and nothing past 3 hours of song time is trusted. Expected length = preparation + drawing seconds per second
 of play x `playSeconds`, both medians over the last renders that recorded them
 (`assumed` 10 s and 1.2x, the Backup node's numbers, until three have). A job
 with no readable frames falls back to the median length of the last 20 finished

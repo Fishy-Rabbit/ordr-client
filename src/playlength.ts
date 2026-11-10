@@ -9,13 +9,20 @@ import type { RenderWindow } from "./window"
  *
  * The frames are an LZMA ("alone" format) block inside the .osr. Node has no LZMA, so
  * the block goes through xz (Debian's xz-utils in the image) as a child process, with
- * the output capped and a time limit: the input comes from callers, and an LZMA stream
- * can expand enormously. Anything that goes wrong gives no length, never an error; the
- * estimate then falls back to the median render.
+ * the output capped, a memory limit, a time limit and at most two at once: the input
+ * comes from callers, and an LZMA stream can expand enormously. Anything that goes wrong
+ * gives no length, never an error; the estimate then falls back to the median render.
  */
 
-/** Decompressed frame text this large is not a replay (a 10-minute play is about 1 MB). */
-export const MAX_FRAME_TEXT_BYTES = 32 * 1024 * 1024
+/** Decompressed frame text this large is not a replay (262 s of play is 0.4 MB, so this is about 1.5 hours). */
+export const MAX_FRAME_TEXT_BYTES = 8 * 1024 * 1024
+
+/** Song time no real play reaches: a frame total past this is not trusted. */
+export const MAX_SONG_MS = 3 * 3600 * 1000
+
+/** xz processes allowed at once; a submission past this gets no length rather than waiting. */
+const MAX_CONCURRENT_XZ = 2
+let runningXz = 0
 
 const XZ_TIMEOUT_MS = 10_000
 const MOD_DOUBLETIME = 1 << 6
@@ -42,7 +49,7 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
             clearTimeout(timer)
             resolve(value)
         }
-        const proc = spawn(opts.xzPath ?? "xz", ["--format=lzma", "--decompress", "--stdout", "--memlimit-decompress=64MiB"], { stdio: ["pipe", "pipe", "ignore"] })
+        const proc = spawn(opts.xzPath ?? "xz", ["--format=lzma", "--decompress", "--stdout", "--memlimit-decompress=32MiB"], { stdio: ["pipe", "pipe", "ignore"] })
         const timer = setTimeout(() => {
             proc.kill("SIGKILL")
             finish(null)
@@ -65,22 +72,37 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
     })
 }
 
-/** The song time (ms) of the last frame: the frames' time deltas summed, the seed frame skipped. */
+/**
+ * The song time (ms) of the last frame: the frames' time deltas summed, the seed frame and
+ * malformed frames (not four "|"-separated fields, non-finite delta) skipped. Scanned in
+ * place, without splitting the text into arrays. Null past MAX_SONG_MS.
+ */
 export function framesEndMs(text: string | null): number | null {
     if (!text) return null
     let t = 0
     let end = 0
     let counted = 0
-    for (const frame of text.split(",")) {
-        const parts = frame.split("|")
-        if (parts.length < 4) continue
-        const w = Number(parts[0])
-        if (!Number.isFinite(w) || w === SEED_FRAME) continue
-        t += w
-        counted++
-        if (t > end) end = t
+    let i = 0
+    while (i < text.length) {
+        let comma = text.indexOf(",", i)
+        if (comma === -1) comma = text.length
+        const bar = text.indexOf("|", i)
+        if (bar !== -1 && bar < comma) {
+            const bar2 = text.indexOf("|", bar + 1)
+            const bar3 = bar2 === -1 ? -1 : text.indexOf("|", bar2 + 1)
+            if (bar3 !== -1 && bar3 < comma) {
+                const w = Number(text.slice(i, bar))
+                if (Number.isFinite(w) && w !== SEED_FRAME) {
+                    t += w
+                    counted++
+                    if (t > end) end = t
+                }
+            }
+        }
+        i = comma + 1
     }
-    return counted > 0 && end > 0 ? end : null
+    if (counted === 0 || end <= 0 || end > MAX_SONG_MS) return null
+    return end
 }
 
 /**
@@ -98,6 +120,12 @@ export function playSeconds(endMs: number, mods: number, window: RenderWindow | 
 export async function replayPlaySeconds(replay: Buffer, header: ReplayHeader, window: RenderWindow | null, opts: DecompressOptions = {}): Promise<number | null> {
     const block = replay.subarray(header.frameOffset, header.frameOffset + header.frameBytes)
     if (block.length !== header.frameBytes) return null
-    const end = framesEndMs(await decompressFrames(block, opts))
-    return end === null ? null : playSeconds(end, header.mods, window)
+    if (runningXz >= MAX_CONCURRENT_XZ) return null
+    runningXz++
+    try {
+        const end = framesEndMs(await decompressFrames(block, opts))
+        return end === null ? null : playSeconds(end, header.mods, window)
+    } finally {
+        runningXz--
+    }
 }

@@ -248,8 +248,6 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
             if (header.mods & MOD_AUTOPLAY) throw new HttpError(400, 11, "autoplay replays cannot be rendered")
             if (header.frameBytes === 0) throw new HttpError(400, 7, "the replay carries no input data")
         }
-        // Read before the checks below, so nothing awaits between them and journal.create.
-        const play = header ? await replayPlaySeconds(sub.replay, header, win.window) : null
         const formMd5 = (f.beatmapMd5 ?? "").trim().toLowerCase()
         const beatmapMd5 = header?.beatmapMd5 ?? (/^[0-9a-f]{32}$/.test(formMd5) ? formMd5 : null)
         if (header && formMd5 && formMd5 !== header.beatmapMd5) log(`submit: form beatmapMd5 ${formMd5} differs from the replay's ${header.beatmapMd5}; trusting the replay`)
@@ -260,21 +258,28 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         if (!caller.staff && asked !== "" && asked !== caller.server) throw new HttpError(403, 403, `this key may only queue ${caller.server} renders`)
         const server = caller.staff ? serverFor(f.server, source) : caller.server
         const scoreId = (f.scoreId ?? "").trim() || null
-        if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
-        if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
-        if (!caller.staff) {
-            const held = journal.all().filter(r => r.server === server && (r.status === "queued" || r.status === "rendering")).length
-            if (held >= cfg.scopedMaxActive) throw new HttpError(503, 40, `${server} already has ${held} renders in the line (the most it may hold); try again later`)
-        }
-        // The videos live on a disk other data shares (on the Backup node: the nightly
-        // backups), so below the floor nothing new is accepted. Jobs already queued still run.
-        if (cfg.minFreeBytes > 0) {
-            const free = freeBytes(cfg.videosDir)
-            if (free < cfg.minFreeBytes) {
-                log(`submit refused: ${Math.floor(free / 1024 ** 3)} GB free under ${cfg.videosDir}, the floor is ${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB (RENDER_MIN_FREE_GB)`)
-                throw new HttpError(503, 43, "the renderer is low on disk space; try again later")
+        const admit = () => {
+            if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
+            if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
+            if (!caller.staff) {
+                const held = journal.all().filter(r => r.server === server && (r.status === "queued" || r.status === "rendering")).length
+                if (held >= cfg.scopedMaxActive) throw new HttpError(503, 40, `${server} already has ${held} renders in the line (the most it may hold); try again later`)
+            }
+            // The videos live on a disk other data shares (on the Backup node: the nightly
+            // backups), so below the floor nothing new is accepted. Jobs already queued still run.
+            if (cfg.minFreeBytes > 0) {
+                const free = freeBytes(cfg.videosDir)
+                if (free < cfg.minFreeBytes) {
+                    log(`submit refused: ${Math.floor(free / 1024 ** 3)} GB free under ${cfg.videosDir}, the floor is ${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB (RENDER_MIN_FREE_GB)`)
+                    throw new HttpError(503, 43, "the renderer is low on disk space; try again later")
+                }
             }
         }
+        // Refused submissions never reach xz. Reading the play length awaits, so the checks
+        // run again after it: nothing awaits between the last check and journal.create.
+        admit()
+        const play = header ? await replayPlaySeconds(sub.replay, header, win.window) : null
+        admit()
 
         const record = journal.create({
             replayUsername: header?.playerName || (f.username ?? "").trim() || "unknown",
