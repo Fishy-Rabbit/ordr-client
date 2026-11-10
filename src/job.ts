@@ -10,6 +10,7 @@ import { Journal, RenderRecord } from "./journal"
 import { buildDanserSettings, DEFAULT_OPTIONS, Json, RenderOptions, writeSlotSettings } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
 import { windowedOptions } from "./window"
+import { childEnv } from "./childenv"
 import { touchSong } from "./songcache"
 
 /**
@@ -24,10 +25,13 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 /** Abort code reserved for shutdown: the render is re-queued instead of failed. */
 export const SHUTDOWN_ABORT = -1
 
-/** danser's environment for one slot: its display, and llvmpipe pinned to a thread budget. */
+/**
+ * danser's environment for one slot: its display, and llvmpipe pinned to a thread budget, over
+ * the worker's environment without its settings and credentials (childEnv).
+ */
 export function slotEnv(cfg: Config, slot: SlotPaths): NodeJS.ProcessEnv {
     return {
-        ...process.env,
+        ...childEnv(),
         DISPLAY: slot.display,
         LIBGL_ALWAYS_SOFTWARE: "1",
         GALLIUM_DRIVER: "llvmpipe",

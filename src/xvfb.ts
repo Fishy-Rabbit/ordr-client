@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from "child_process"
+import { childEnv } from "./childenv"
 import fs from "fs"
 
 /** Resolve after `ms` milliseconds. */
@@ -50,6 +51,7 @@ export class Xvfb {
         }
         this.stderrTail = ""
         const proc = spawn("Xvfb", [this.displayName, "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-nocursor"], {
+            env: childEnv(),
             stdio: ["ignore", "ignore", "pipe"]
         })
         this.proc = proc

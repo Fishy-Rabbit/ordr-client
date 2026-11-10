@@ -126,6 +126,20 @@ filesystem holding `VIDEOS_DIR` has less free space than that. Jobs already queu
 It exists because the videos share a disk with other data (on the Backup node: the nightly
 backups), and a public site can ask for videos faster than the 30-day sweep removes them.
 
+### Uploads and child processes
+
+`POST /renders` refuses what it cannot take before it reads the upload: a full queue, a scoped
+key's server at its cap, the free-disk floor (`503` / code 40 or 43), or a key that already has
+`RENDER_MAX_UPLOADS` uploads in progress (`503` / code 40). An upload is held in memory until its
+render is recorded, so parallel uploads hold at most `RENDER_MAX_UPLOADS` x `RENDER_MAX_REPLAY_MB`
+per key (the staff key, or each scoped key's server). The queue checks run again right before
+the render is recorded, with nothing awaited in between.
+
+danser, xz and Xvfb get the worker's environment without its `RENDER_*` settings and without
+any variable whose name reads as a key, token, secret or password, so a child that a crafted
+replay or map set takes over does not find the API keys there. They still run as the worker's
+user, with the same access to its files.
+
 ### Map cache
 
 `SONGS_DIR` keeps one `<setId>.osz` per set, fetched from the mirror the first time it is
@@ -173,6 +187,7 @@ an active render from the same server answers code 29.
 | `RENDER_SONG_CACHE_DAYS` | `30` | Cached `.osz` sets nobody used for this long are deleted by the same sweep (see "Map cache"). |
 | `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
 | `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |
+| `RENDER_MAX_UPLOADS` | `4` | Uploads one key may have in progress at once (the staff key, or each scoped key's server); past it `POST /renders` answers 503 / code 40 without reading the body. |
 | `RENDER_MAX_OSZ_MB` | `256` | Largest map set (`.osz`) a render may use. A bigger download is cut off and a bigger cached file is not opened; the render fails with code 8. osu! itself refuses uploads over 100 MB, but a few older sets are larger. |
 | `MIRROR_BASE` | `http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100` | The beatmap mirror. |
 | `MIRROR_DOWNLOAD_PATH` | `/api/v1/hinai/d/{id}` | Appended to `MIRROR_BASE` with `{id}` = beatmapsetId; must answer the `.osz` bytes (a JSON resolver answer fails the render with code 8). |

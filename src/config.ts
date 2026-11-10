@@ -44,6 +44,12 @@ export type Config = {
     songCacheDays: number
     maxQueue: number
     maxReplayBytes: number
+    /**
+     * Uploads one key may have in progress at once (the staff key, or each scoped key's server).
+     * An upload is held in memory until its render is recorded, so this, not the job caps, bounds
+     * what parallel POSTs can hold: at most this many times maxReplayBytes per key.
+     */
+    maxUploads: number
     /** A map set (.osz) larger than this is refused (code 8): its download is cut off, a cached copy is not read. */
     maxOszBytes: number
     mirrorBase: string
@@ -164,6 +170,7 @@ export function loadConfig(): Config {
         songCacheDays: Math.max(1, num("RENDER_SONG_CACHE_DAYS", 30)),
         maxQueue: Math.max(1, Math.floor(num("RENDER_MAX_QUEUE", 20))),
         maxReplayBytes: Math.max(1, num("RENDER_MAX_REPLAY_MB", 16)) * 1024 * 1024,
+        maxUploads: Math.max(1, Math.floor(num("RENDER_MAX_UPLOADS", 4))),
         // osu! refuses uploads over 100 MB; a few older sets are larger (151 MB without
         // video was the biggest of ~67,000 archived ones), so the default leaves room.
         maxOszBytes: Math.max(1, num("RENDER_MAX_OSZ_MB", 256)) * 1024 * 1024,

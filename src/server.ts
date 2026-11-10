@@ -240,12 +240,59 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
         return records.map(r => toApi(r, scheduler.queuePosition(r), { seconds: eta.get(r.renderID), basis: etaBasisFor(r, model, typical, now) }))
     }
 
+    /** Uploads in progress per key: null for the staff key, a scoped key's server otherwise (cfg.maxUploads). */
+    const uploads = new Map<string | null, number>()
+
     /**
-     * Validate a POST /renders submission (resolution, skin, options, window, set id, replay
-     * header), admit it, record it and store its replay, then wake the scheduler. Every refusal is
-     * an HttpError.
+     * Throw the refusal if the worker cannot take another render for `server` (null for the staff
+     * key, which has no cap of its own): a full queue, a scoped server already holding its cap, or
+     * the free-disk floor. Runs before an upload is read and again right before it is recorded.
+     */
+    const checkCapacity = (server: string | null) => {
+        if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
+        if (server !== null) {
+            const held = journal.all().filter(r => r.server === server && (r.status === "queued" || r.status === "rendering")).length
+            if (held >= cfg.scopedMaxActive) throw new HttpError(503, 40, `${server} already has ${held} renders in the line (the most it may hold); try again later`)
+        }
+        // The videos share a disk with other data, so below the floor nothing new is accepted.
+        // Jobs already queued still run.
+        if (cfg.minFreeBytes > 0) {
+            const free = freeBytes(cfg.videosDir)
+            if (free < cfg.minFreeBytes) {
+                log(`submit refused: ${Math.floor(free / 1024 ** 3)} GB free under ${cfg.videosDir}, the floor is ${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB (RENDER_MIN_FREE_GB)`)
+                throw new HttpError(503, 43, "the renderer is low on disk space; try again later")
+            }
+        }
+    }
+
+    /**
+     * Take a POST /renders submission (see receive). An upload is held in memory until its render
+     * is recorded, so what cannot be taken is refused BEFORE the body is read: a full line (for the
+     * caller's own server when it is scoped), or a key that already has cfg.maxUploads uploads in
+     * progress. Node discards the unread body after the answer. The count covers the whole
+     * submission, so parallel POSTs can hold at most cfg.maxUploads replays per key.
      */
     const submit = async (req: http.IncomingMessage, caller: Caller): Promise<{ renderID: number; window: RenderWindow | null }> => {
+        const key = caller.staff ? null : caller.server
+        checkCapacity(key)
+        const inProgress = uploads.get(key) ?? 0
+        if (inProgress >= cfg.maxUploads) throw new HttpError(503, 40, `this key already has ${inProgress} uploads in progress (the most at once); try again shortly`)
+        uploads.set(key, inProgress + 1)
+        try {
+            return await receive(req, caller)
+        } finally {
+            const left = (uploads.get(key) ?? 1) - 1
+            if (left > 0) uploads.set(key, left)
+            else uploads.delete(key)
+        }
+    }
+
+    /**
+     * Read and validate a POST /renders submission (resolution, skin, options, window, set id,
+     * replay header), admit it, record it and store its replay, then wake the scheduler. Every
+     * refusal is an HttpError.
+     */
+    const receive = async (req: http.IncomingMessage, caller: Caller): Promise<{ renderID: number; window: RenderWindow | null }> => {
         const sub = await readMultipart(req, cfg.maxReplayBytes)
         if (sub.truncated) throw new HttpError(413, 5, `the replay is larger than the ${Math.round(cfg.maxReplayBytes / 1048576)} MB limit`)
         if (!sub.replay || sub.replay.length === 0) throw new HttpError(400, 2, "missing replayFile")
@@ -298,20 +345,7 @@ export function createServer(cfg: Config, journal: Journal, scheduler: Scheduler
          */
         const admit = () => {
             if (scoreId && journal.findActiveByScore(server, scoreId)) throw new HttpError(409, 29, `${server} score ${scoreId} is already queued or rendering`)
-            if (journal.counts().queued >= cfg.maxQueue) throw new HttpError(503, 40, `the queue is full (${cfg.maxQueue} renders waiting); try again later`)
-            if (!caller.staff) {
-                const held = journal.all().filter(r => r.server === server && (r.status === "queued" || r.status === "rendering")).length
-                if (held >= cfg.scopedMaxActive) throw new HttpError(503, 40, `${server} already has ${held} renders in the line (the most it may hold); try again later`)
-            }
-            // The videos live on a disk other data shares (on the Backup node: the nightly
-            // backups), so below the floor nothing new is accepted. Jobs already queued still run.
-            if (cfg.minFreeBytes > 0) {
-                const free = freeBytes(cfg.videosDir)
-                if (free < cfg.minFreeBytes) {
-                    log(`submit refused: ${Math.floor(free / 1024 ** 3)} GB free under ${cfg.videosDir}, the floor is ${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB (RENDER_MIN_FREE_GB)`)
-                    throw new HttpError(503, 43, "the renderer is low on disk space; try again later")
-                }
-            }
+            checkCapacity(caller.staff ? null : server)
         }
         // Refused submissions never reach xz. Reading the play length awaits, so the checks
         // run again after it: nothing awaits between the last check and journal.create.
