@@ -191,7 +191,7 @@ an active render from the same server answers code 29.
 | `RENDER_THREADS_PER_SLOT` | `4` | `LP_NUM_THREADS` for llvmpipe in each slot. |
 | `RENDER_TIMEOUT_MIN` | `90` | A render past this is killed and marked failed (code 21). |
 | `RENDER_STALL_SEC` | `90` | No output growth for this long is treated as a wedged danser. |
-| `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`). |
+| `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`). A video that cannot be deleted is logged and tried again at the next sweep. |
 | `RENDER_SONG_CACHE_DAYS` | `30` | Cached `.osz` sets nobody used for this long are deleted by the same sweep (see "Map cache"). |
 | `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
 | `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |

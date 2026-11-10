@@ -103,7 +103,9 @@ export class Scheduler {
      * Delete videos past the retention window (marking their records removed) and unused cached
      * maps. A failed record that still names a video counts too: when the "done" write fails after
      * the video was moved into place, the worker records the render as failed with the video kept,
-     * and without this the file would never be deleted.
+     * and without this the file would never be deleted. A video that cannot be deleted (a
+     * permission or I/O error) is logged and its record left as it is, for the next sweep: one
+     * stuck file must not stop the sweep, nor the worker, which also sweeps when it starts.
      */
     sweep(): void {
         const cutoff = Date.now() - this.cfg.retentionDays * 24 * 60 * 60 * 1000
@@ -112,9 +114,13 @@ export class Scheduler {
             if (r.removed || !(r.status === "done" || (r.status === "failed" && r.videoFile))) continue
             const when = Date.parse(r.finishedAt ?? r.date)
             if (!Number.isFinite(when) || when > cutoff) continue
-            if (r.videoFile) fs.rmSync(r.videoFile, { force: true })
-            this.journal.update(r.renderID, { removed: true })
-            swept++
+            try {
+                if (r.videoFile) fs.rmSync(r.videoFile, { force: true })
+                this.journal.update(r.renderID, { removed: true })
+                swept++
+            } catch (err) {
+                this.log(`retention sweep left render ${r.renderID} for the next sweep: ${(err as Error).message}`)
+            }
         }
         if (swept) this.log(`retention sweep removed ${swept} video(s) older than ${this.cfg.retentionDays} days`)
         const songs = sweepSongCache(this.cfg.songsDir, this.journal, this.cfg.songCacheDays)

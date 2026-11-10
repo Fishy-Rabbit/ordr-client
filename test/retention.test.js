@@ -57,3 +57,35 @@ test("the retention sweep deletes old videos of done records and of failed recor
     assert.equal(fs.existsSync(recentFailedWithVideo.videoFile), true, "videos inside the window stay")
     assert.ok(lines.some((l) => /retention sweep removed 2 video/.test(l)), lines.join("\n"))
 })
+
+test("a video the sweep cannot delete is left for the next sweep, and the sweep goes on", (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "retention-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    const videosDir = path.join(dir, "videos")
+    const songsDir = path.join(dir, "songs")
+    fs.mkdirSync(videosDir)
+    fs.mkdirSync(songsDir)
+    const journal = new Journal(dir)
+    journal.load()
+
+    // A directory where the video should be: rmSync refuses it, as it refuses a file the worker
+    // may not delete (the tests run as root, so a permission error cannot be staged here).
+    const stuck = finished(journal, videosDir, 40, "done", false)
+    const stuckPath = path.join(videosDir, `render${stuck.id}.mp4`)
+    fs.mkdirSync(stuckPath)
+    fs.writeFileSync(path.join(stuckPath, "part"), "x")
+    journal.update(stuck.id, { videoFile: stuckPath })
+    const after = finished(journal, videosDir, 40, "done", true)
+
+    const lines = []
+    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir }
+    assert.doesNotThrow(() => new Scheduler(cfg, journal, [], {}, (l) => lines.push(l)).sweep())
+
+    /** Whether the sweep marked this render removed. */
+    const removed = (x) => journal.all().find((r) => r.renderID === x.id).removed === true
+    assert.equal(removed(stuck), false, "the record stays for the next sweep")
+    assert.equal(fs.existsSync(stuckPath), true)
+    assert.equal(removed(after), true, "records after the stuck one are still swept")
+    assert.equal(fs.existsSync(after.videoFile), false)
+    assert.ok(lines.some((l) => l.includes(`render ${stuck.id} for the next sweep`)), lines.join("\n"))
+})
