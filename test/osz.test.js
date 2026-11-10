@@ -4,7 +4,9 @@
 // files inside it all have size caps, checked before anything is read into memory
 // (RENDER_MAX_OSZ_MB and OSU_FILE_LIMITS, added 2026-11-10). Two slots that need the same
 // uncached set share one download, and a finished render is recorded done before its replay is
-// deleted, so a crash between the two can never strand a finished video.
+// deleted, so a crash between the two can never strand a finished video. A render still preparing
+// its map when the worker begins shutting down is never started: it goes back to the queue with
+// its replay, like a render the shutdown aborted (added 2026-11-10).
 const test = require("node:test")
 const assert = require("node:assert/strict")
 const crypto = require("crypto")
@@ -16,6 +18,7 @@ const AdmZip = require("adm-zip")
 const { HINAI_MIRROR_HOSTS } = require("../build/config")
 const { ensureOsz, inspectOsz, OszLimitError, OSU_FILE_LIMITS, prepareSlotDirs, replayPath, runRenderJob } = require("../build/job")
 const { Journal } = require("../build/journal")
+const { Scheduler } = require("../build/queue")
 
 const MB = 1024 * 1024
 
@@ -286,4 +289,30 @@ test("a finished render is recorded done before its replay is deleted", async (t
     assert.equal(after.videoFile, path.join(cfg.videosDir, `render${id}.mp4`))
     assert.ok(fs.existsSync(after.videoFile))
     assert.ok(lines.some((l) => new RegExp(`render ${id} done in`).test(l)), lines.join("\n"))
+})
+
+test("a render still preparing its map when shutdown begins is re-queued with its replay, never started", async (t) => {
+    const dir = tempDir(t, "osz-shutdown-")
+    const { cfg, journal, record } = renderSetup(dir, { fake: false, retentionDays: 30, songCacheDays: 30 })
+    put(cfg.songsDir, "77.osz", oszBuffer({ "hard.osu": osuText("Hard") }))
+    // A stand-in danser-cli that only leaves a mark and fails: once shutdown has begun it must not run.
+    const mark = path.join(dir, "danser-started")
+    fs.writeFileSync(path.join(cfg.danserDir, "danser-cli"), `#!/bin/sh\n: > '${mark}'\nexit 1\n`, { mode: 0o755 })
+    const slot = prepareSlotDirs(cfg, 0, ":99")
+    fs.chmodSync(path.join(slot.danserDir, "danser-cli"), 0o755)
+    const lines = []
+    const scheduler = new Scheduler(cfg, journal, [slot], {}, (l) => lines.push(l))
+    // start() launches the render, which then waits for its map (even a cached one is awaited);
+    // stop() lands during that wait, as a SIGTERM would, while the slot has no danser run to abort.
+    scheduler.start()
+    scheduler.stop()
+    const id = record.renderID
+    const deadline = Date.now() + 10_000
+    while (journal.get(id).status === "rendering" && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+    const after = journal.get(id)
+    assert.equal(after.status, "queued", lines.join("\n"))
+    assert.equal(after.progress, "Waiting (resumed after a restart)")
+    assert.equal(after.slot, null)
+    assert.equal(fs.existsSync(replayPath(cfg, id)), true, "the replay is kept for the next boot")
+    assert.equal(fs.existsSync(mark), false, "danser was never started")
 })

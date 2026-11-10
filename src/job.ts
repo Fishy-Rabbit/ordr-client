@@ -325,8 +325,14 @@ function moveFile(from: string, to: string): void {
  * failure: the record is marked failed with a code and the log tail. A map set
  * refused for its size or unreadable fails with code 8 and is not kept. A
  * finished render is recorded done before its replay is deleted.
+ *
+ * `register` hands the danser run to the scheduler, so a shutdown can abort it, and
+ * gets null once the run settles. It returns false when the worker began shutting
+ * down while this render prepared its map: the scheduler's stop() could not abort a
+ * run that did not exist yet, so the run is never started and the render goes back
+ * to the queue with its replay, like a render the shutdown aborted.
  */
-export async function runRenderJob(cfg: Config, journal: Journal, record: RenderRecord, slot: SlotPaths, template: Json, log: (line: string) => void, register: (run: DanserRun | null) => void): Promise<void> {
+export async function runRenderJob(cfg: Config, journal: Journal, record: RenderRecord, slot: SlotPaths, template: Json, log: (line: string) => void, register: (run: DanserRun | null) => boolean | void): Promise<void> {
     const id = record.renderID
     const osr = replayPath(cfg, id)
     /** Mark the render failed with this code and message, delete its replay, and log the message's first line. */
@@ -335,6 +341,8 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         fs.rmSync(osr, { force: true })
         log(`render ${id} failed (${errorCode}): ${errorMessage.split("\n")[0]}`)
     }
+    /** The worker is going down: keep the replay and let the next boot re-run the render. */
+    const requeueForRestart = () => journal.update(id, { status: "queued", progress: "Waiting (resumed after a restart)", slot: null })
 
     journal.update(id, { status: "rendering", progress: "Rendering (preparing)", startedAt: new Date().toISOString(), drawStartedAt: null, progressAt: null, slot: slot.index })
     log(`render ${id} starting on slot ${slot.index} (${record.resolution}, skin ${record.skin}${record.window ? `, window ${record.window.start}-${record.window.end}s` : ""})`)
@@ -390,14 +398,17 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         onDrawStart: () => journal.update(id, { drawStartedAt: new Date().toISOString() }),
         log
     })
-    register(run)
+    if (register(run) === false) {
+        requeueForRestart()
+        log(`render ${id} re-queued: the worker began shutting down while its map was being prepared`)
+        return
+    }
     const outcome = await run.run()
     register(null)
 
     if (!outcome.success) {
         if (outcome.errorCode === SHUTDOWN_ABORT) {
-            // The worker is going down: keep the replay and let the next boot re-run it.
-            journal.update(id, { status: "queued", progress: "Waiting (resumed after a restart)", slot: null })
+            requeueForRestart()
             return
         }
         return finishFail(outcome.errorCode, outcome.errorMessage)

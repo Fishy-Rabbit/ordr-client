@@ -82,7 +82,13 @@ export class Scheduler {
             if (this.cfg.fake) {
                 await runFakeJob(this.cfg, this.journal, record, this.log)
             } else {
-                await runRenderJob(this.cfg, this.journal, record, this.slots[slot], this.template, this.log, run => (entry.run = run))
+                await runRenderJob(this.cfg, this.journal, record, this.slots[slot], this.template, this.log, run => {
+                    // After stop() a new run is refused: stop() aborted the runs it could see, and this
+                    // one did not exist yet, so starting it now would outlive the displays.
+                    if (run && this.stopped) return false
+                    entry.run = run
+                    return true
+                })
             }
         } catch (err) {
             this.log(`render ${record.renderID}: worker error ${(err as Error).stack ?? err}`)
@@ -112,7 +118,8 @@ export class Scheduler {
 
     /**
      * Stop scheduling and the daily sweep, and abort running renders with SHUTDOWN_ABORT so they go
-     * back to the queue.
+     * back to the queue. A render still preparing its map has no run to abort yet; when it reaches
+     * registration it is refused (see launch) and goes back to the queue the same way.
      */
     stop(): void {
         this.stopped = true
