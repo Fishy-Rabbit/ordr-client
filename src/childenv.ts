@@ -3,12 +3,17 @@
 // keys in its environment. Added 2026-11-10.
 
 /**
- * Variables no child needs: every RENDER_* setting (RENDER_API_KEY and RENDER_SCOPED_KEYS among
- * them) and any name that reads as a credential: a key, token, secret, password or AUTH setting
- * (DOCKER_AUTH_CONFIG, SSH_AUTH_SOCK). A word counts only between underscores or at either end,
- * so XAUTHORITY and KEYBOARD pass.
+ * Variables no child needs, case ignored:
+ * - every RENDER_* setting (RENDER_API_KEY and RENDER_SCOPED_KEYS among them);
+ * - any name that contains SECRET, TOKEN, PASSWORD, PASSWD or CREDENTIAL anywhere, joined to other
+ *   words or not (CLIENTSECRET, DB_PASSWORD, GOOGLE_APPLICATION_CREDENTIALS);
+ * - any name with KEY, APIKEY (or API_KEY), a plural of those, PASS, AUTH or AUTHORIZATION as a
+ *   whole word: between underscores or at either end (DOCKER_AUTH_CONFIG, SSH_AUTH_SOCK, SMTP_PASS).
+ * The short words count only as whole words, so XAUTHORITY, KEYBOARD and PASSAGE pass; a name such
+ * as DBPASS passes too, which is why the README tells operators to keep credentials out of the
+ * worker's environment instead of relying on this list.
  */
-const WITHHELD = /^RENDER_|(^|_)(API_?KEYS?|KEYS?|TOKENS?|SECRETS?|PASS(WORD|WD)?|CREDENTIALS?|AUTH)(_|$)/i
+const WITHHELD = /^RENDER_|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|(^|_)(API_?KEYS?|KEYS?|PASS|AUTH|AUTHORIZATION)(_|$)/i
 
 /**
  * A copy of `base` (the process environment by default) without what only the worker may hold

@@ -32,6 +32,9 @@ test("childEnv drops the worker's settings and anything that reads as a credenti
         RENDER_API_KEY: "s", RENDER_SCOPED_KEYS: "d", RENDER_MAX_QUEUE: "20", render_api_key: "s", ORDR_API_KEY: "s", API_KEYS: "s",
         GITHUB_TOKEN: "s", DB_PASSWORD: "s", SMTP_PASS: "s", AWS_SECRET_ACCESS_KEY: "s", SOME_CREDENTIALS: "s",
         DOCKER_AUTH_CONFIG: "{}", SSH_AUTH_SOCK: "/run/agent.sock", BASIC_AUTH: "u:p",
+        // The long words count inside other words too; AUTHORIZATION is a word of its own.
+        AUTHORIZATION: "Bearer s", HTTP_AUTHORIZATION: "Bearer s", CLIENTSECRET: "s", OSU_CLIENTSECRET: "s",
+        DBPASSWORD: "s", MYSQL_ROOTPASSWD: "s", APITOKEN: "s", GOOGLE_APPLICATION_CREDENTIALS: "/c.json",
     })
     assert.deepEqual(Object.keys(env).sort(), ["HOME", "KEYBOARD", "LANG", "LD_LIBRARY_PATH", "MONKEY", "OAUTH_REDIRECT", "PASSAGE", "PATH", "XAUTHORITY", "XKB_KEYMAP"])
 })

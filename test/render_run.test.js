@@ -7,6 +7,8 @@
 //   (before, the answer was decided at exit and could miss it);
 // - danser exits but a child it started keeps the output open: shortly after the exit, after
 //   reading a last line danser left without a newline (an unterminated "Finished." counts).
+// danser leads its own process group, and the run kills that group when it aborts and when a
+// child still holds the output after the exit, so nothing danser started outlives the run.
 // The settings-template step at boot (job.ts generateSettingsTemplate) survives a danser that
 // cannot be started too: before, the child's unhandled `error` event crashed the worker.
 // The stand-in danser-cli scripts below play danser's part.
@@ -30,6 +32,43 @@ function workspace(t) {
 /** Install a stand-in danser-cli made of these shell lines. */
 function standIn(dir, lines) {
     fs.writeFileSync(path.join(dir, "danser-cli"), ["#!/bin/sh", ...lines].join("\n") + "\n", { mode: 0o755 })
+}
+
+/** Whether a process still runs; a killed process its parent has not reaped yet counts as gone. */
+function alive(pid) {
+    if (!fs.existsSync("/proc/self/stat")) {
+        try {
+            process.kill(pid, 0)
+            return true
+        } catch {
+            return false
+        }
+    }
+    try {
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8")
+        return stat.charAt(stat.lastIndexOf(")") + 2) !== "Z"
+    } catch {
+        return false
+    }
+}
+
+/** Wait up to `ms` for a process to be gone; true when it is. */
+async function gone(pid, ms = 3000) {
+    const until = Date.now() + ms
+    while (alive(pid)) {
+        if (Date.now() > until) return false
+        await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return true
+}
+
+/** Kill a stand-in's child if it is still there, so a failing test does not leave it running. */
+function killQuietly(pid) {
+    try {
+        process.kill(pid, "SIGKILL")
+    } catch {
+        // already gone
+    }
 }
 
 /** A run of the stand-in in `dir`, rendering to `out/render1.mp4`. */
@@ -71,7 +110,7 @@ test("the last line is read before the run is decided: Finished. right before ex
     }
 })
 
-test("a child that keeps danser's output open does not hold the run: it settles shortly after the exit", async (t) => {
+test("a child that keeps danser's output open does not hold the run: it is killed and the run settles shortly after the exit", async (t) => {
     const dir = workspace(t)
     const pidFile = path.join(dir, "child.pid")
     standIn(dir, [
@@ -84,15 +123,14 @@ test("a child that keeps danser's output open does not hold the run: it settles 
     const started = Date.now()
     const outcome = await danserRun(dir).run()
     const took = Date.now() - started
-    // End the child now: it still holds danser's output pipes, so this test file's process would
-    // wait for it, and its pid file goes with the workspace when the test ends.
-    try {
-        process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL")
-    } catch {
-        // already gone
-    }
+    const child = Number(fs.readFileSync(pidFile, "utf8"))
+    const childGone = await gone(child)
+    // If it survived, end it here: it holds danser's output pipes, so this test file's process
+    // would wait for it.
+    killQuietly(child)
     assert.equal(outcome.success, true)
     assert.ok(took < 10_000, `settled ${took} ms after the start, not when the child ends`)
+    assert.ok(childGone, "the child was killed with danser's process group, not left running in the slot")
 })
 
 test("an unterminated Finished. is still read when a child keeps the output open past the exit", async (t) => {
@@ -107,13 +145,11 @@ test("an unterminated Finished. is still read when a child keeps the output open
         "exit 0",
     ])
     const outcome = await danserRun(dir).run()
-    // End the child now, as in the test above: it still holds danser's output pipes.
-    try {
-        process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL")
-    } catch {
-        // already gone
-    }
+    const child = Number(fs.readFileSync(pidFile, "utf8"))
+    const childGone = await gone(child)
+    killQuietly(child) // as in the test above
     assert.deepEqual(outcome, { success: true, videoPath: path.join(dir, "out", "render1.mp4") })
+    assert.ok(childGone, "the child was killed with danser's process group")
 })
 
 test("a failed exit still reports code 21 with the exit code and the log tail", async (t) => {
@@ -123,6 +159,21 @@ test("a failed exit still reports code 21 with the exit code and the log tail", 
     assert.equal(outcome.success, false)
     assert.equal(outcome.errorCode, 21)
     assert.equal(outcome.errorMessage, "danser exited with code 3\nsomething went wrong")
+})
+
+test("the time limit ends danser's whole process group: a child it started does not outlive the run", async (t) => {
+    const dir = workspace(t)
+    const pidFile = path.join(dir, "child.pid")
+    // The child plays danser's ffmpeg: started by danser, holding its output, still running.
+    standIn(dir, ["sleep 60 &", `echo $! > '${pidFile}'`, "exec sleep 60"])
+    const outcome = await danserRun(dir, { timeoutMs: 500 }).run()
+    const child = Number(fs.readFileSync(pidFile, "utf8"))
+    const childGone = await gone(child)
+    killQuietly(child)
+    assert.equal(outcome.success, false)
+    assert.equal(outcome.errorCode, 21)
+    assert.match(outcome.errorMessage, /^render exceeded the 0 minute limit/)
+    assert.ok(childGone, "abort killed danser's child too, so it cannot keep writing into the released slot")
 })
 
 test("the time limit still ends a run whose danser never exits", async (t) => {

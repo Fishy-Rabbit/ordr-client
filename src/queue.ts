@@ -99,12 +99,17 @@ export class Scheduler {
         }
     }
 
-    /** Delete videos past the retention window (marking their records removed) and unused cached maps. */
+    /**
+     * Delete videos past the retention window (marking their records removed) and unused cached
+     * maps. A failed record that still names a video counts too: when the "done" write fails after
+     * the video was moved into place, the worker records the render as failed with the video kept,
+     * and without this the file would never be deleted.
+     */
     sweep(): void {
         const cutoff = Date.now() - this.cfg.retentionDays * 24 * 60 * 60 * 1000
         let swept = 0
         for (const r of this.journal.all()) {
-            if (r.status !== "done" || r.removed) continue
+            if (r.removed || !(r.status === "done" || (r.status === "failed" && r.videoFile))) continue
             const when = Date.parse(r.finishedAt ?? r.date)
             if (!Number.isFinite(when) || when > cutoff) continue
             if (r.videoFile) fs.rmSync(r.videoFile, { force: true })

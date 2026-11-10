@@ -136,13 +136,17 @@ per key (the staff key, or each scoped key's server). The queue checks run again
 the render is recorded, with nothing awaited in between.
 
 xz, which reads the replay frames callers send, gets `PATH` and nothing else. danser and Xvfb
-get the worker's environment without its `RENDER_*` settings and without any variable whose name
-reads as a key, token, secret, password or auth setting (such as `DOCKER_AUTH_CONFIG` or
-`SSH_AUTH_SOCK`), so a child that a crafted replay or map set takes over does not find the API
-keys there. A credential under another name (a database URL, say) still reaches danser and
-Xvfb, so keep unrelated credentials out of the worker's environment. The children still run as
-the worker's user, with the same access to its files and sockets (withholding `SSH_AUTH_SOCK`
-hides the path, not the socket).
+get the worker's environment without its `RENDER_*` settings, so a child that a crafted replay
+or map set takes over does not find the API keys there. They also lose, case ignored, any
+variable whose name contains `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `CREDENTIAL` anywhere
+(`CLIENTSECRET`, `DB_PASSWORD`), and any whose name has `KEY`, `APIKEY` (or `API_KEY`), a plural
+of those, `PASS`, `AUTH` or `AUTHORIZATION` as a whole word, between underscores or at either end
+(`DOCKER_AUTH_CONFIG`, `SSH_AUTH_SOCK`, `SMTP_PASS`). Those short words inside a longer word do
+not count, so `XAUTHORITY` and `KEYBOARD` pass, and so would `DBPASS`. A credential under such a
+name, or under another name altogether (a database URL, say), still reaches danser and Xvfb, so
+keep unrelated credentials out of the worker's environment. The children still run as the
+worker's user, with the same access to its files and sockets (withholding `SSH_AUTH_SOCK` hides
+the path, not the socket).
 
 ### Map cache
 

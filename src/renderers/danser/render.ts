@@ -56,7 +56,8 @@ export function danserArguments(a: Pick<DanserRunArgs, "replayPath" | "outName" 
 
 /**
  * One danser-cli process for one render: progress from its log, failures mapped to error codes,
- * killed when it stalls or overruns.
+ * killed when it stalls or overruns. danser leads its own process group, so a kill ends everything
+ * it started (its ffmpeg encoder among them) and nothing outlives the run in the slot's folders.
  */
 export class DanserRun {
     private proc: ChildProcess | null = null
@@ -66,20 +67,36 @@ export class DanserRun {
     /** Prepare a run; nothing starts until run(). */
     constructor(private readonly args: DanserRunArgs) {}
 
-    /** Kill danser; the first reason given is the one reported. */
+    /** Kill danser and everything it started; the first reason given is the one reported. */
     abort(errorCode: number, message: string): void {
         if (this.abortCode === null) {
             this.abortCode = errorCode
             this.abortMessage = message
         }
-        this.proc?.kill("SIGKILL")
+        this.killGroup()
+    }
+
+    /**
+     * SIGKILL danser's whole process group (danser and every process it started, ffmpeg among
+     * them), falling back to danser alone if the group cannot be signalled. A no-op once the run
+     * has settled: the handle is dropped then, so a pid the system has since reused is never hit.
+     */
+    private killGroup(): void {
+        const proc = this.proc
+        if (!proc || proc.pid === undefined) return
+        try {
+            process.kill(-proc.pid, "SIGKILL")
+        } catch {
+            proc.kill("SIGKILL")
+        }
     }
 
     /**
      * Start danser and settle exactly once: when its output has closed after it exited (so its last
      * lines, "Finished." among them, have been read), CLOSE_GRACE_MS after the exit if a child of
-     * danser keeps the output open (a last line without a newline is read first), or at once when
-     * danser cannot be started at all. The answer is
+     * danser keeps the output open (that child is killed with the rest of danser's process group,
+     * and a last line without a newline is read first), or at once when danser cannot be started
+     * at all. The answer is
      * the video path on success, else the abort reason, the first failure recognised in its log, or
      * code 21; each failure carries the log tail. The time limit and the stall detector end a hung
      * run through abort(). Settling stops both timers and drops the process handle.
@@ -111,7 +128,8 @@ export class DanserRun {
         }
 
         return new Promise<DanserOutcome>(resolve => {
-            const proc = spawn("./danser-cli", danserArguments(a), { cwd: a.danserDir, env: a.env, stdio: ["ignore", "pipe", "pipe"] })
+            // detached: danser leads a new process group, so killGroup() reaches what it starts.
+            const proc = spawn("./danser-cli", danserArguments(a), { cwd: a.danserDir, env: a.env, stdio: ["ignore", "pipe", "pipe"], detached: true })
             this.proc = proc
 
             const timeout = setTimeout(() => this.abort(21, `render exceeded the ${Math.round(a.timeoutMs / 60000)} minute limit`), a.timeoutMs)
@@ -243,9 +261,12 @@ export class DanserRun {
                 if (proc.pid === undefined) conclude(null, null)
             })
             // At exit, stdout may still hold danser's last lines; close comes once they are read. When
-            // a child keeps the pipes open, the fallback reads the held partial lines, then decides.
+            // a child keeps the pipes open, the fallback kills that child with the rest of the group
+            // (so it cannot keep writing into the slot once the slot is released), reads the held
+            // partial lines, then decides.
             proc.on("exit", (code, signal) => {
                 closeWait = setTimeout(() => {
+                    this.killGroup()
                     flushStdout()
                     flushStderr()
                     conclude(code, signal)
