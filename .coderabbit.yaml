@@ -1,0 +1,233 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit settings for ordr-render (this fork of MasterIO02/ordr-client).
+#
+# inheritance: true keeps every setting from the organization settings in the
+# CodeRabbit app (review profile, summaries, pre-merge checks, ...) and only
+# overrides what is written here. Without it, this file would replace those
+# settings with CodeRabbit's defaults.
+inheritance: true
+
+reviews:
+  auto_review:
+    # By default only PRs into the default branch are reviewed automatically.
+    # Work here is often stacked (a PR whose base is another feature branch);
+    # the pattern is an unanchored regular expression, so ".*" matches every
+    # base branch.
+    base_branches:
+      - ".*"
+
+  # Review only: CodeRabbit never approves, and never opens follow-up PRs or
+  # pushes commits of its own (docstrings, tests, fixes, merges).
+  auto_approvals:
+    enabled: false
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+
+  path_filters:
+    # Binary test fixture (an LZMA replay frame block): nothing to read as text.
+    # package-lock.json stays reviewable on purpose: it is small, and a
+    # dependency change matters in a worker that parses untrusted uploads.
+    - "!test/fixtures/**/*.lzma"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        ordr-render is a fork of MasterIO02/ordr-client rewritten as a self-hosted osu!
+        replay render worker: one Node.js process (TypeScript compiled to CommonJS, Node 22)
+        with an HTTP API (node:http + busboy) that queues uploaded .osr replays, renders them
+        with danser-cli under Xvfb and Mesa llvmpipe (CPU only) and serves the MP4s. Its only
+        state is one JSON journal file; there is no database. Review with these rules:
+        - Treat every request, header, form field and replay file as untrusted, even behind a
+          valid key: the keys are held by other sites' backends and render panels. The .osr
+          bytes, their LZMA frame block and the .osz sets downloaded from the mirror are all
+          parsed here and must stay bounded in memory, time and processes.
+        - README.md is the API and configuration contract. Flag changes to routes, fields,
+          response shapes, error codes or environment variables that README.md does not
+          describe, and README.md claims the code does not implement.
+        - The only outbound request allowed is the beatmap download from the hinai mirror
+          (src/job.ts). Flag any new network call, telemetry, update check or runtime
+          download. The upstream websocket client, updater, telemetry and ORV renderer were
+          removed on purpose and must not come back.
+        - Child processes (danser-cli, Xvfb, xz, ffmpeg) are spawned with argument arrays and
+          no shell. Flag shell: true, exec(), or command strings built from input.
+        - Refusals reuse o!rdr's error codes (listed in README.md). A new refusal path should
+          reuse an existing code consistently or document a new one.
+        - Every function and method carries a short JSDoc block; keep that for new code.
+
+    - path: "src/server.ts"
+      instructions: |
+        HTTP surface and access control.
+        - Keys: the staff key is compared in constant time (keyMatches). Scoped keys are
+          SHA-256 digests compared with timingSafeEqual against every entry, with no early
+          exit (identify). Flag early returns, plain string comparison, and any logging or
+          echoing of keys, digests or request headers.
+        - Only GET/HEAD /health is open. Every other route must run after identify(). Fake
+          mode without RENDER_API_KEY is the single exception, and loadConfig refuses a
+          missing key outside fake mode.
+        - A scoped key acts for one server: every read path (GET /renders, ?renderID=,
+          GET /queue, /videos) filters with canSee, and another server's render must look
+          exactly like a missing one (404 or an empty list). A POST naming another server is
+          refused with 403, never rewritten.
+        - submit(): admit() runs before and again after the awaited play-length read; nothing
+          may await between the second admit() and journal.create, or the queue cap, the
+          per-key cap and the duplicate-score check can be raced.
+        - readMultipart keeps busboy's limits (40 fields, 4 KiB per field, one file,
+          maxReplayBytes) and drains file parts other than replayFile; a truncated replay is
+          413 / code 5. Flag unbounded buffering or new file fields.
+        - serveVideo takes the file path from the journal record only (numeric id, journal
+          lookup, record.videoFile); a path must never be built from the URL. Check Range
+          parsing edge cases, and that a read-stream error cannot crash the process.
+        - Client errors are HttpError with a status and a code; anything else becomes a
+          generic 500 with no stack trace in the body.
+
+    - path: "src/config.ts"
+      instructions: |
+        Configuration from the environment.
+        - A bad number (num) or a malformed RENDER_SCOPED_KEYS entry refuses the boot: a key
+          must never be dropped silently. RENDER_SCOPED_KEYS holds SHA-256 digests only,
+          never raw keys.
+        - HINAI_MIRROR_HOSTS is deliberately not overridable by environment, and loadConfig
+          refuses a MIRROR_BASE outside it (fake mode excepted). Flag any widening of that
+          list, an environment override, or a fallback mirror.
+        - loadConfig refuses to start without RENDER_API_KEY outside fake mode; keep the
+          Math.max floors that bound the queue, the timeouts and the retention windows.
+        - Every variable read here must appear in README.md "Configuration (environment)"
+          with the same default.
+
+    - path: "src/job.ts"
+      instructions: |
+        Mirror download and the per-render slot lifecycle.
+        - fetchFromMirror uses redirect: "manual", follows at most one hop and only to a
+          hinai mirror host, with a 10-minute timeout. Flag automatic redirect following or
+          any request to a host outside HINAI_MIRROR_HOSTS.
+        - ensureOsz streams to <setId>.osz.part, checks the zip magic, then renames; the set
+          id is a validated positive integer. Flag writes into SONGS_DIR that skip the .part
+          and rename step, and file paths built from client strings.
+        - .osz contents are untrusted: inspectOsz reads the entries in memory with adm-zip
+          and must never extract to disk by entry name (zip slip). Watch for unbounded reads.
+        - Two render slots can work on the same beatmap set at the same time: check shared
+          files (the songs cache and its .part file) for races.
+        - runRenderJob never throws for a render failure: it marks the record failed with a
+          code and the log tail and deletes the replay; SHUTDOWN_ABORT re-queues instead.
+
+    - path: "src/osr.ts"
+      instructions: |
+        Parses the header of an uploaded .osr: attacker-controlled bytes.
+        - Every read goes through Reader.need; strings are 0x00, or 0x0b plus a ULEB128
+          length of at most five bytes; a buffer under 32 bytes is refused; the ruleset byte
+          and the beatmap md5 are validated.
+        - Failures must be ReplayParseError with code 2 (unreadable) or 5 (truncated); any
+          other exception type changes the API answer. Watch for 32-bit overflow in the
+          bitwise ULEB128 decoding and for negative or oversized lengths.
+
+    - path: "src/playlength.ts"
+      instructions: |
+        Reads a replay's play length from its LZMA frame block through xz.
+        - Keep every bound: the argument-array spawn, --memlimit-decompress=32MiB, the
+          declared-size precheck, the MAX_FRAME_TEXT_BYTES output cap and the 10-second
+          timeout (both SIGKILL), and at most MAX_CONCURRENT_XZ runs (the excess gets null at
+          once and never waits).
+        - Every failure yields null and never throws: a submission must not fail because its
+          length is unknown.
+        - framesEndMs stays one linear pass with no per-frame allocation; MAX_SONG_MS bounds
+          the result.
+
+    - path: "src/renderers/danser/**"
+      instructions: |
+        The danser process driver (render.ts) and settings mapping (prepare.ts), adapted from
+        upstream under BSD-3-Clause: keep the attribution headers.
+        - render.ts: danser-cli is spawned with danserArguments (an argument array). run()
+          must settle in every case: a spawn failure, a crash, the time limit and the stall
+          detector. Check the child-process event handling (error, exit, close) and that the
+          timers are always cleared. Only the capped log tail goes into error messages.
+        - prepare.ts maps only the eight client options; every other danser setting is
+          fixed. The skin value must be a folder name resolved by src/skins.ts, never raw
+          client input.
+
+    - path: "src/journal.ts"
+      instructions: |
+        The render journal is the worker's only state.
+        - It is rewritten whole: a temp file, then a rename. Status changes flush at once;
+          progress-only ticks coalesce for 500 ms. Keep that split.
+        - A new RenderRecord field needs a back-fill in load() for records written before it;
+          ids stay monotonic across restarts.
+        - Flag work on hot paths that grows with the journal: every flush rewrites the whole
+          file, and the GET handlers scan all().
+
+    - path: "src/queue.ts"
+      instructions: |
+        FIFO scheduler and the daily sweeps.
+        - Renders still marked rendering at boot go back to the queue; a shutdown abort
+          (SHUTDOWN_ABORT) re-queues instead of failing.
+        - The retention sweep deletes only the videos of done records past
+          RENDER_RETENTION_DAYS, by the path stored in the record.
+        - tick() must never hand one render to two slots.
+
+    - path: "src/songcache.ts"
+      instructions: |
+        Deletes cached .osz sets. Only files named <setId>.osz or <setId>.osz.part are ever
+        touched. A set stays while its mtime or the journal shows use inside the window, or
+        while a render for it is queued or rendering. Flag deletion of any other file, or of
+        a set an active job needs.
+
+    - path: "src/skins.ts"
+      instructions: |
+        Skin names come from clients. resolveSkin must only return names taken from the
+        skins folder listing or the built-in aliases, never the raw request, and
+        defaultSkinFolder rejects path separators. Flag anything that joins a client string
+        into a filesystem path.
+
+    - path: "src/xvfb.ts"
+      instructions: |
+        One Xvfb per render slot. Keep -nolisten tcp (no X server on the network) and the
+        supervision: a respawn after an unexpected exit, none after stop().
+
+    - path: "Dockerfile"
+      instructions: |
+        - danser-go is downloaded once at build time, pinned by DANSER_SHA256 and checked
+          with sha256sum -c; a version bump needs a hash bump. The worker never downloads
+          anything at runtime.
+        - npm ci runs with --ignore-scripts, and the runtime image runs as uid 1001, not
+          root.
+        - No BuildKit-only syntax (no RUN --mount): a classic builder must be able to build
+          it.
+        - xz-utils comes from Debian bookworm (5.4.x, older than the backdoored 5.6.0 and
+          5.6.1 releases). Flag a base image or package source change that could pull 5.6.0
+          or 5.6.1.
+
+    - path: "docker/**"
+      instructions: |
+        The entrypoint must exec node so it stays PID 1 and SIGTERM reaches the graceful
+        shutdown (src/main.ts). Keep it POSIX sh with set -eu.
+
+    - path: "test/**"
+      instructions: |
+        node:test suites in plain JavaScript that run against the compiled build/ (npm test
+        runs tsc first, then node --test test/*.test.js). HTTP tests bind 127.0.0.1 on an
+        ephemeral port and must close their servers and remove their temp folders. The
+        xz-dependent tests skip when xz is missing (HAS_XZ), so a skipped xz test is not a
+        pass. Tests must not reach the network or a real mirror.
+
+    - path: "README.md"
+      instructions: |
+        The API and configuration contract that render panels are written against: routes,
+        fields, response shapes, error codes, environment variables and defaults. Check each
+        change against src/server.ts and src/config.ts and flag drift in either direction.
+
+knowledge_base:
+  # This repository is public: its reviews must never draw on other (possibly
+  # private) repositories of the organization, whatever the organization
+  # setting is. No linked_repositories either.
+  automatic_linking_mode: disabled
