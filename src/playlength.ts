@@ -72,34 +72,40 @@ export function decompressFrames(block: Buffer, opts: DecompressOptions = {}): P
     })
 }
 
+const COMMA = 44
+const BAR = 124
+
 /**
  * The song time (ms) of the last frame: the frames' time deltas summed, the seed frame and
- * malformed frames (not four "|"-separated fields, non-finite delta) skipped. Scanned in
- * place, without splitting the text into arrays. Null past MAX_SONG_MS.
+ * malformed frames (fewer than four "|"-separated fields, non-finite delta) skipped. One
+ * pass over the characters, no arrays: linear whatever the text holds. Null past MAX_SONG_MS.
  */
 export function framesEndMs(text: string | null): number | null {
     if (!text) return null
     let t = 0
     let end = 0
     let counted = 0
-    let i = 0
-    while (i < text.length) {
-        let comma = text.indexOf(",", i)
-        if (comma === -1) comma = text.length
-        const bar = text.indexOf("|", i)
-        if (bar !== -1 && bar < comma) {
-            const bar2 = text.indexOf("|", bar + 1)
-            const bar3 = bar2 === -1 ? -1 : text.indexOf("|", bar2 + 1)
-            if (bar3 !== -1 && bar3 < comma) {
-                const w = Number(text.slice(i, bar))
+    let frameStart = 0
+    let firstBar = -1
+    let bars = 0
+    for (let k = 0; k <= text.length; k++) {
+        const c = k < text.length ? text.charCodeAt(k) : COMMA
+        if (c === BAR) {
+            if (bars === 0) firstBar = k
+            bars++
+        } else if (c === COMMA) {
+            if (bars >= 3) {
+                const w = Number(text.slice(frameStart, firstBar))
                 if (Number.isFinite(w) && w !== SEED_FRAME) {
                     t += w
                     counted++
                     if (t > end) end = t
                 }
             }
+            frameStart = k + 1
+            firstBar = -1
+            bars = 0
         }
-        i = comma + 1
     }
     if (counted === 0 || end <= 0 || end > MAX_SONG_MS) return null
     return end

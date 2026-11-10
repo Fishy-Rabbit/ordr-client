@@ -74,6 +74,15 @@ test("framesEndMs refuses totals no real play reaches (over 3 hours of song time
     assert.equal(framesEndMs("10|1|1,20|1|1|0"), 20, "a frame needs four fields")
 })
 
+test("framesEndMs stays linear on hostile text (many frames with no '|', or '|' with no ',')", () => {
+    for (const text of [",".repeat(4_000_000) + "10|1|1|0", "|".repeat(4_000_000), ",|".repeat(2_000_000)]) {
+        const started = Date.now()
+        framesEndMs(text)
+        assert.ok(Date.now() - started < 1000, `took ${Date.now() - started} ms`)
+    }
+    assert.equal(framesEndMs(",".repeat(1000) + "10|1|1|0"), 10)
+})
+
 test("at most two xz processes run at once; a third replay gets no length instead of waiting", { skip: !HAS_XZ && "xz is not installed here" }, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slowxz-"))
     try {
