@@ -33,12 +33,21 @@ function tempDir(t, prefix) {
     return dir
 }
 
-/** Listen on a free local port; resolves to the port, and closes the server when the test ends. */
+/**
+ * Listen on a free local port; resolves to the port. When the test ends the server is closed and
+ * the cleanup waits for close's callback, so no test ends while the server still holds handles.
+ * close() runs first and stops new connections; closeAllConnections() then drops the open ones,
+ * which close() would otherwise wait for. The callback also fires (with an error) when the server
+ * never started listening, so the cleanup always finishes.
+ */
 function listen(t, server) {
-    t.after(() => {
-        server.closeAllConnections?.()
-        server.close()
-    })
+    t.after(
+        () =>
+            new Promise((resolve) => {
+                server.close(() => resolve())
+                server.closeAllConnections?.()
+            })
+    )
     return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)))
 }
 

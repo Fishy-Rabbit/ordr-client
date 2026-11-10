@@ -56,7 +56,9 @@ ENV PORT=3002 \
     NODE_ENV=production
 USER 1001
 EXPOSE 3002
-# Shell form on purpose: sh expands PORT when the check runs, so a container started with
-# another PORT is probed where the worker listens (unset or empty means 3002, as in loadConfig).
-HEALTHCHECK --interval=30s --timeout=5s --start-period=90s CMD curl -fsS "http://127.0.0.1:${PORT:-3002}/health" || exit 1
+# Shell form on purpose, so the check reads PORT when it runs: a container started with another
+# PORT is probed where the worker listens. The port is worked out the way loadConfig's num() does
+# it (unset or empty means 3002, anything else is Number(PORT), so 3e3 is 3000); a PORT that is not
+# a valid port number stops the worker at boot, and then there is nothing to probe.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s CMD curl -fsS "http://127.0.0.1:$(node -p 'const p = process.env.PORT; p === undefined || p === "" ? 3002 : Number(p)')/health" || exit 1
 ENTRYPOINT ["/app/docker/entrypoint.sh"]

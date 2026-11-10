@@ -44,7 +44,8 @@ const TAIL_LINES = 40
 /**
  * After danser exits, how long run() waits for its output to close before deciding without it. The
  * pipes close within milliseconds of a normal exit, but a child danser left running (its ffmpeg)
- * holds them open until it ends.
+ * holds them open until it ends. Deciding without the close first reads any last line danser left
+ * without a newline, so an unterminated "Finished." still counts.
  */
 const CLOSE_GRACE_MS = 2000
 
@@ -77,7 +78,8 @@ export class DanserRun {
     /**
      * Start danser and settle exactly once: when its output has closed after it exited (so its last
      * lines, "Finished." among them, have been read), CLOSE_GRACE_MS after the exit if a child of
-     * danser keeps the output open, or at once when danser cannot be started at all. The answer is
+     * danser keeps the output open (a last line without a newline is read first), or at once when
+     * danser cannot be started at all. The answer is
      * the video path on success, else the abort reason, the first failure recognised in its log, or
      * code 21; each failure carries the log tail. The time limit and the stall detector end a hung
      * run through abort(). Settling stops both timers and drops the process handle.
@@ -209,10 +211,19 @@ export class DanserRun {
                 }
                 if (isPanic || line.startsWith("fatal error:")) panicking = true
             }
-            /** Feed a stream to onLine line by line (LF or CRLF), including a last line with no newline. */
-            const attach = (stream: NodeJS.ReadableStream | null, name: "stdout" | "stderr") => {
-                if (!stream) return
+            /**
+             * Feed a stream to onLine line by line (LF or CRLF). A last line with no newline is held
+             * until the stream ends, or until the returned flush hands it over: the exit fallback
+             * calls it when a child of danser keeps the stream open past the exit.
+             */
+            const attach = (stream: NodeJS.ReadableStream | null, name: "stdout" | "stderr"): (() => void) => {
+                if (!stream) return () => {}
                 let buffer = ""
+                /** Hand the held partial line, if any, to onLine and forget it. */
+                const flush = () => {
+                    if (buffer) onLine(buffer, name)
+                    buffer = ""
+                }
                 stream.setEncoding("utf8")
                 stream.on("data", (chunk: string) => {
                     buffer += chunk
@@ -220,21 +231,25 @@ export class DanserRun {
                     buffer = lines.pop() ?? ""
                     for (const line of lines) onLine(line, name)
                 })
-                stream.on("end", () => {
-                    if (buffer) onLine(buffer, name)
-                })
+                stream.on("end", flush)
+                return flush
             }
-            attach(proc.stdout, "stdout")
-            attach(proc.stderr, "stderr")
+            const flushStdout = attach(proc.stdout, "stdout")
+            const flushStderr = attach(proc.stderr, "stderr")
 
             proc.on("error", err => {
                 fail(21, `could not start danser: ${err.message}`)
                 // No pid: danser never started, and no exit is guaranteed to follow.
                 if (proc.pid === undefined) conclude(null, null)
             })
-            // At exit, stdout may still hold danser's last lines; close comes once they are read.
+            // At exit, stdout may still hold danser's last lines; close comes once they are read. When
+            // a child keeps the pipes open, the fallback reads the held partial lines, then decides.
             proc.on("exit", (code, signal) => {
-                closeWait = setTimeout(() => conclude(code, signal), CLOSE_GRACE_MS)
+                closeWait = setTimeout(() => {
+                    flushStdout()
+                    flushStderr()
+                    conclude(code, signal)
+                }, CLOSE_GRACE_MS)
             })
             proc.on("close", (code, signal) => conclude(code, signal))
         })

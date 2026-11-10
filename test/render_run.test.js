@@ -5,7 +5,8 @@
 //   slot stayed busy for good);
 // - danser exits: once its output has closed, so its last line ("Finished.") has been read
 //   (before, the answer was decided at exit and could miss it);
-// - danser exits but a child it started keeps the output open: shortly after the exit.
+// - danser exits but a child it started keeps the output open: shortly after the exit, after
+//   reading a last line danser left without a newline (an unterminated "Finished." counts).
 // The settings-template step at boot (job.ts generateSettingsTemplate) survives a danser that
 // cannot be started too: before, the child's unhandled `error` event crashed the worker.
 // The stand-in danser-cli scripts below play danser's part.
@@ -92,6 +93,27 @@ test("a child that keeps danser's output open does not hold the run: it settles 
     }
     assert.equal(outcome.success, true)
     assert.ok(took < 10_000, `settled ${took} ms after the start, not when the child ends`)
+})
+
+test("an unterminated Finished. is still read when a child keeps the output open past the exit", async (t) => {
+    const dir = workspace(t)
+    const pidFile = path.join(dir, "child.pid")
+    // Both conditions at once: the last line has no newline, and the output never closes on its own.
+    standIn(dir, [
+        "sleep 60 &",
+        `echo $! > '${pidFile}'`,
+        `: > '${path.join(dir, "out", "render1.mp4")}'`,
+        "printf '2026/11/10 12:01:00 Finished.'",
+        "exit 0",
+    ])
+    const outcome = await danserRun(dir).run()
+    // End the child now, as in the test above: it still holds danser's output pipes.
+    try {
+        process.kill(Number(fs.readFileSync(pidFile, "utf8")), "SIGKILL")
+    } catch {
+        // already gone
+    }
+    assert.deepEqual(outcome, { success: true, videoPath: path.join(dir, "out", "render1.mp4") })
 })
 
 test("a failed exit still reports code 21 with the exit code and the log tail", async (t) => {
