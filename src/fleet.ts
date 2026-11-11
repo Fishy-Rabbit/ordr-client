@@ -1,0 +1,212 @@
+import type { Journal, RenderRecord } from "./journal"
+
+/**
+ * The shared queue as every server sees it. fishy and kawata feed this one
+ * worker: this module names which server each job came from (their score ids
+ * overlap, so a duplicate check must be per server), and computes one wait
+ * estimate over every job, so both sites print the same number for the same
+ * moment of the same queue.
+ */
+
+/** Assumed render length before any render has finished. */
+export const FALLBACK_RENDER_SECONDS = 210
+
+/** How many finished renders the typical duration is taken over. */
+const DURATION_SAMPLE = 20
+
+/** A valid server name: lower-case, digits and dashes, at most 32 characters. */
+export const SERVER_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/
+
+/**
+ * The server a job belongs to: the explicit `server` field when it is a valid
+ * name, otherwise read from `source`. kawata's staging host is
+ * kawata.fishy.moe, so kawata is matched before fishy.
+ */
+export function serverFor(explicit: string | undefined, source: string): string {
+    const given = (explicit ?? "").trim().toLowerCase()
+    if (SERVER_NAME.test(given)) return given
+    const text = source.toLowerCase()
+    if (text.includes("kawata")) return "kawata"
+    if (text.includes("fishy")) return "fishy"
+    return "other"
+}
+
+/** `"Rendering (45%)"` -> 45; null when the text carries no percentage. */
+export function progressPercent(progress: string): number | null {
+    const match = /(\d{1,3})%/.exec(progress)
+    return match ? Math.min(100, Number(match[1])) : null
+}
+
+/**
+ * The typical render length in seconds, and whether it was measured from finished renders or is the
+ * assumed fallback.
+ */
+export type Typical = { seconds: number; basis: "measured" | "assumed" }
+
+/** Median length of the most recent finished renders from every server; the fallback until one finishes. */
+export function typicalDuration(journal: Journal): Typical {
+    const durations: number[] = []
+    const all = journal.all()
+    for (let i = all.length - 1; i >= 0 && durations.length < DURATION_SAMPLE; i--) {
+        const r = all[i]
+        if (r.status !== "done" || !r.startedAt || !r.finishedAt) continue
+        const seconds = (Date.parse(r.finishedAt) - Date.parse(r.startedAt)) / 1000
+        if (Number.isFinite(seconds) && seconds > 0) durations.push(seconds)
+    }
+    if (durations.length === 0) return { seconds: FALLBACK_RENDER_SECONDS, basis: "assumed" }
+    durations.sort((a, b) => a - b)
+    const mid = durations.length >> 1
+    const median = durations.length % 2 ? durations[mid] : (durations[mid - 1] + durations[mid]) / 2
+    return { seconds: Math.round(median), basis: "measured" }
+}
+
+/**
+ * Seconds from danser's 100% to the finished file (muxing, the move out of the slot).
+ * Measured 3 s on a full 261 s render on the Backup node, 2026-11-10; 5 leaves a margin.
+ */
+export const FINALIZE_SECONDS = 5
+
+/** danser reports every 5%; below that too little is drawn to trust the speed. */
+const MIN_PROJECT_PERCENT = 5
+
+/**
+ * Seconds a drawing job still needs, from its OWN speed: the time it took to draw the
+ * percentage it last reported, scaled to the rest, counted down from that report. Null
+ * when there is no draw start, no fresh percentage, or too little drawn yet.
+ *
+ * A render's length follows the play's length (6 s to 330 s on the live journal), so
+ * the median render length says nothing about this one; until 2026-11-10 the estimate
+ * used it and read "about 5 seconds left" for minutes on long maps.
+ */
+export function projectedSecondsLeft(record: RenderRecord, now: number = Date.now()): number | null {
+    const pct = progressPercent(record.progress)
+    if (pct === null || pct < MIN_PROJECT_PERCENT || pct >= 100) return null
+    const drawStart = record.drawStartedAt ? Date.parse(record.drawStartedAt) : NaN
+    const tick = record.progressAt ? Date.parse(record.progressAt) : NaN
+    if (!Number.isFinite(drawStart) || !Number.isFinite(tick) || tick <= drawStart) return null
+    const drawn = (tick - drawStart) / 1000
+    const leftAtTick = (drawn * (100 - pct)) / pct + FINALIZE_SECONDS
+    return Math.max(5, Math.round(leftAtTick - (now - tick) / 1000))
+}
+
+/** How a render's length follows its play: preparation, then drawing per second of play. */
+export type RenderModel = { prepSeconds: number; drawPerPlaySecond: number; basis: "measured" | "assumed" }
+
+/**
+ * Until three renders have recorded both, the Backup node's numbers from 2026-11-10: 7 to 8 s
+ * from start to the first frame with the map cached (10 leaves room for a mirror download),
+ * and 311 to 323 s to draw 262 s of play, finishing included (1.19 to 1.23 s per second).
+ */
+export const ASSUMED_MODEL: RenderModel = { prepSeconds: 10, drawPerPlaySecond: 1.2, basis: "assumed" }
+
+/** Finished renders with a play length and a draw start needed before the model is measured. */
+const MODEL_MIN_SAMPLES = 3
+
+/** The median of a non-empty list (the mean of the middle two for an even count); the input is not modified. */
+function median(values: number[]): number {
+    const sorted = [...values].sort((a, b) => a - b)
+    const mid = sorted.length >> 1
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** Medians over the most recent finished renders that recorded their play length and draw start. */
+export function renderModel(journal: Journal): RenderModel {
+    const preps: number[] = []
+    const rates: number[] = []
+    const all = journal.all()
+    for (let i = all.length - 1; i >= 0 && preps.length < DURATION_SAMPLE; i--) {
+        const r = all[i]
+        if (r.status !== "done" || !r.playSeconds || !r.startedAt || !r.drawStartedAt || !r.finishedAt) continue
+        const prep = (Date.parse(r.drawStartedAt) - Date.parse(r.startedAt)) / 1000
+        const draw = (Date.parse(r.finishedAt) - Date.parse(r.drawStartedAt)) / 1000
+        if (!Number.isFinite(prep) || !Number.isFinite(draw) || prep < 0 || draw <= 0) continue
+        preps.push(prep)
+        rates.push(draw / r.playSeconds)
+    }
+    if (preps.length < MODEL_MIN_SAMPLES) return ASSUMED_MODEL
+    return { prepSeconds: Math.round(median(preps) * 10) / 10, drawPerPlaySecond: Math.round(median(rates) * 100) / 100, basis: "measured" }
+}
+
+/** Seconds a whole render of this job should take: from its play length when known, else the median render. */
+export function expectedSeconds(record: RenderRecord, model: RenderModel, typical: Typical): number {
+    if (record.playSeconds && record.playSeconds > 0) return Math.round(model.prepSeconds + model.drawPerPlaySecond * record.playSeconds)
+    return typical.seconds
+}
+
+/** What a job's own estimate rests on: its drawing speed, its play length (under the model), or the median. */
+export function etaBasisFor(record: RenderRecord, model: RenderModel, typical: Typical, now: number = Date.now()): "measured" | "assumed" {
+    if (record.status === "rendering" && projectedSecondsLeft(record, now) !== null) return "measured"
+    if (record.playSeconds && record.playSeconds > 0) return model.basis
+    return typical.basis
+}
+
+/**
+ * Seconds a rendering job still needs: projected from its own drawing speed when it has
+ * one, else its expected length (from its play length) less the time it has run, else
+ * its share of a typical render, else a typical render less the time it has run.
+ */
+function remainingFor(record: RenderRecord, typical: Typical, model: RenderModel, now: number): number {
+    const projected = projectedSecondsLeft(record, now)
+    if (projected !== null) return projected
+    const started = record.startedAt ? Date.parse(record.startedAt) : NaN
+    if (record.playSeconds && record.playSeconds > 0) {
+        const elapsed = Number.isFinite(started) ? (now - started) / 1000 : 0
+        return Math.max(5, Math.round(expectedSeconds(record, model, typical) - elapsed))
+    }
+    return legacyRemaining(record, typical.seconds, started, now)
+}
+
+/** The rule for jobs with no play length: a share of the median, or the median less the time run. */
+function legacyRemaining(record: RenderRecord, typical: number, started: number, now: number): number {
+    const pct = progressPercent(record.progress)
+    if (pct !== null) return Math.max(5, Math.round((typical * (100 - pct)) / 100))
+    if (Number.isFinite(started)) return Math.max(5, Math.round(typical - (now - started) / 1000))
+    return typical
+}
+
+/** Insert into an ascending list, keeping it sorted. */
+function insertSorted(list: number[], value: number): void {
+    let i = 0
+    while (i < list.length && list[i] <= value) i++
+    list.splice(i, 0, value)
+}
+
+/**
+ * Seconds until each active job is done, simulated over the worker's slots.
+ * Running jobs need what remainingFor says is left; queued jobs then take
+ * the earliest free slot in FIFO order, each for its own expected length
+ * (its play length under the model, or a median render when unknown), which
+ * is exactly how the scheduler hands them out.
+ */
+export function etaByRender(journal: Journal, slots: number, typical: Typical, now: number = Date.now(), model: RenderModel = renderModel(journal)): Map<number, number> {
+    const eta = new Map<number, number>()
+    const freeAt: number[] = []
+    for (const r of journal.all()) {
+        if (r.status !== "rendering") continue
+        const left = remainingFor(r, typical, model, now)
+        eta.set(r.renderID, left)
+        insertSorted(freeAt, left)
+    }
+    while (freeAt.length < Math.max(1, slots)) insertSorted(freeAt, 0)
+    for (const r of journal.queued()) {
+        const start = freeAt.shift() ?? 0
+        const done = start + expectedSeconds(r, model, typical)
+        eta.set(r.renderID, Math.round(done))
+        insertSorted(freeAt, done)
+    }
+    return eta
+}
+
+/** Queued and rendering job counts per server name. */
+export type ServerCounts = Record<string, { queued: number; rendering: number }>
+
+/** Active jobs per server; a server with nothing queued or rendering is absent. */
+export function serverCounts(journal: Journal): ServerCounts {
+    const out: ServerCounts = {}
+    for (const r of journal.all()) {
+        if (r.status !== "queued" && r.status !== "rendering") continue
+        const entry = out[r.server] ?? (out[r.server] = { queued: 0, rendering: 0 })
+        entry[r.status]++
+    }
+    return out
+}

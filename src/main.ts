@@ -1,37 +1,91 @@
 import fs from "fs"
-import { generateConfig, readConfig } from "./util/config"
+import path from "path"
 import injectTimestamp from "./util/inject_timestamp"
-import { setGlobalDispatcher, Agent } from "undici"
+import { loadConfig, VERSION } from "./config"
+import { Journal } from "./journal"
+import { Xvfb } from "./xvfb"
+import { generateSettingsTemplate, prepareSlotDirs, SlotPaths } from "./job"
+import { Json } from "./renderers/danser/prepare"
+import { Scheduler } from "./queue"
+import { createServer } from "./server"
+import { defaultSkinFolder } from "./skins"
 
-async function main() {
-    console.log("Starting up...")
+injectTimestamp()
+/** Write one line to stdout; injectTimestamp prefixes it with the time. */
+const log = (line: string) => console.log(line)
 
-    // generate a new config if there's none
-    if (!fs.existsSync("config.json")) await generateConfig()
+/**
+ * Boot the worker: read the configuration and the journal, start one Xvfb display and slot per
+ * RENDER_CONCURRENCY (none in fake mode), capture danser's settings template, then start the
+ * scheduler and the HTTP server and wire SIGTERM and SIGINT to a graceful shutdown.
+ */
+async function main(): Promise<void> {
+    const cfg = loadConfig()
+    log(`ordr-render ${VERSION} starting (${cfg.fake ? "FAKE mode" : `danser ${cfg.danserVersion}, ${cfg.concurrency} slot(s) x ${cfg.threadsPerSlot} threads`})`)
+    for (const dir of [cfg.videosDir, cfg.songsDir, cfg.skinsDir, cfg.stateDir, cfg.replaysDir, cfg.workDir]) fs.mkdirSync(dir, { recursive: true })
 
-    // parse and read the config first
-    let config = await readConfig()
-    if (!config) {
-        // we have an invalid config.json file, exiting the client (invalid values are logged by readConfig)
-        process.exit(1)
+    // The default skin is resolved per request (the folder may land while the
+    // worker runs), so a missing one is a warning here, never a refusal.
+    if (cfg.defaultSkin === "") log(`default skin: danser's built-in (RENDER_DEFAULT_SKIN unset)`)
+    else if (defaultSkinFolder(cfg.skinsDir, cfg.defaultSkin)) log(`default skin: ${cfg.defaultSkin} (${cfg.skinsDir}/${cfg.defaultSkin})`)
+    else log(`WARNING: RENDER_DEFAULT_SKIN=${cfg.defaultSkin} but ${path.join(cfg.skinsDir, cfg.defaultSkin)} is not a folder; \`default\` renders with danser's built-in skin until it exists`)
+
+    // Names only: the digests are not secret, but nothing about a key belongs in a log.
+    const scoped = [...new Set(cfg.scopedKeys.map(k => k.server))]
+    log(`scoped keys: ${scoped.length ? `${scoped.join(", ")} (at most ${cfg.scopedMaxActive} active jobs each)` : "none"}`)
+    log(`free-disk floor: ${cfg.minFreeBytes > 0 ? `${Math.round(cfg.minFreeBytes / 1024 ** 3)} GB under ${cfg.videosDir}` : "off"}`)
+    const journal = new Journal(cfg.stateDir)
+    journal.load()
+    log(`journal: ${journal.all().length} render(s) on record`)
+
+    const displays: Xvfb[] = []
+    const slots: SlotPaths[] = []
+    let template: Json = {}
+    if (!cfg.fake) {
+        if (!fs.existsSync(path.join(cfg.danserDir, "danser-cli"))) throw new Error(`danser-cli not found in ${cfg.danserDir} (DANSER_DIR)`)
+        for (let i = 0; i < cfg.concurrency; i++) {
+            const xvfb = new Xvfb(cfg.displayBase + i, log)
+            await xvfb.start()
+            displays.push(xvfb)
+            slots.push(prepareSlotDirs(cfg, i, xvfb.displayName))
+            log(`slot ${i}: display ${xvfb.displayName}, work dir ${slots[i].root}`)
+        }
+        template = await generateSettingsTemplate(cfg, slots[0], log)
     }
 
-    // if we are in development mode, we can allow self-signed certificates
-    if (config.dev) {
-        setGlobalDispatcher(
-            new Agent({
-                connect: {
-                    rejectUnauthorized: false
-                }
-            })
-        )
+    const scheduler = new Scheduler(cfg, journal, slots, template, log)
+    scheduler.start()
+
+    const server = createServer(cfg, journal, scheduler, log)
+    server.listen(cfg.port, "0.0.0.0", () => log(`listening on :${cfg.port}`))
+
+    let shuttingDown = false
+    /**
+     * Close the server, stop the scheduler (running renders are aborted and re-queued) and the
+     * displays, then flush the journal and exit 1.5 s later. A second signal is ignored.
+     */
+    const shutdown = (signal: string) => {
+        if (shuttingDown) return
+        shuttingDown = true
+        log(`${signal}: shutting down`)
+        server.close()
+        scheduler.stop()
+        for (const d of displays) d.stop()
+        setTimeout(() => {
+            journal.flush()
+            process.exit(0)
+        }, 1500)
     }
-
-    if (config.log_timestamps) injectTimestamp()
-
-    // dynamically importing the main client function when we're sure we have the config in memory
-    let client = await import("./client")
-    client.startClient()
+    process.on("SIGTERM", () => shutdown("SIGTERM"))
+    process.on("SIGINT", () => shutdown("SIGINT"))
 }
 
-main()
+process.on("unhandledRejection", err => {
+    console.error("fatal: unhandled rejection", err)
+    process.exit(1)
+})
+
+main().catch(err => {
+    console.error(`fatal: ${(err as Error).message}`)
+    process.exit(1)
+})

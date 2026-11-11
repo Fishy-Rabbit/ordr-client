@@ -1,0 +1,206 @@
+import path from "path"
+import { SERVER_NAME } from "./fleet"
+
+/** This worker's version: GET /health reports it and the boot line logs it. */
+export const VERSION = "1.0.0"
+
+/** One output preset: frame size and rate, and whether it uses the turbo (preview) encoder settings. */
+export type Preset = { width: number; height: number; fps: number; turbo: boolean }
+
+/**
+ * The resolutions a client may ask for. The keys are the exact wire values;
+ * 640x480 is the turbo preview preset (15 fps, ultrafast x264, tiny audio).
+ */
+export const PRESETS: Record<string, Preset> = {
+    "1280x720": { width: 1280, height: 720, fps: 30, turbo: false },
+    "960x540": { width: 960, height: 540, fps: 30, turbo: false },
+    "1920x1080": { width: 1920, height: 1080, fps: 60, turbo: false },
+    "640x480": { width: 640, height: 480, fps: 15, turbo: true }
+}
+/** The resolution a submission gets when it names none. */
+export const DEFAULT_RESOLUTION = "1280x720"
+
+/** One scoped key: it acts for `server` only. The key itself never reaches this process, only its SHA-256. */
+export type ScopedKey = { server: string; hash: Buffer }
+
+/** The worker's configuration, read once from the environment by loadConfig. */
+export type Config = {
+    port: number
+    /** The staff key: every route, every server's jobs. */
+    apiKey: string
+    /** Keys that act for ONE server (RENDER_SCOPED_KEYS); see parseScopedKeys. */
+    scopedKeys: ScopedKey[]
+    /** Most queued + rendering jobs a scoped key's server may hold at once (RENDER_SCOPED_MAX_ACTIVE). */
+    scopedMaxActive: number
+    /** New renders are refused while the videos filesystem has less free space than this; 0 = no floor. */
+    minFreeBytes: number
+    fake: boolean
+    concurrency: number
+    threadsPerSlot: number
+    timeoutMs: number
+    stallMs: number
+    retentionDays: number
+    /** Cached .osz sets nobody used for this many days are deleted by the daily sweep. */
+    songCacheDays: number
+    maxQueue: number
+    maxReplayBytes: number
+    /**
+     * Uploads one key may have in progress at once (the staff key, or each scoped key's server).
+     * An upload is held in memory until its render is recorded, so this, not the job caps, bounds
+     * what parallel POSTs can hold: at most this many times maxReplayBytes per key.
+     */
+    maxUploads: number
+    /** A map set (.osz) larger than this is refused (code 8): its download is cut off, a cached copy is not read. */
+    maxOszBytes: number
+    mirrorBase: string
+    mirrorDownloadPath: string
+    mirrorUserAgent: string
+    videosDir: string
+    songsDir: string
+    skinsDir: string
+    /** Folder under skinsDir that the wire value `default` resolves to; "" = danser's built-in. */
+    defaultSkin: string
+    stateDir: string
+    replaysDir: string
+    workDir: string
+    danserDir: string
+    danserVersion: string
+    displayBase: number
+    debug: boolean
+}
+
+/**
+ * A numeric environment variable, or `fallback` when it is unset or empty; a value that is not a
+ * finite number refuses the boot.
+ */
+function num(name: string, fallback: number): number {
+    const raw = process.env[name]
+    if (raw === undefined || raw === "") return fallback
+    const n = Number(raw)
+    if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got ${JSON.stringify(raw)}`)
+    return n
+}
+
+/** A string environment variable, or `fallback` when it is unset or empty. */
+function str(name: string, fallback: string): string {
+    const raw = process.env[name]
+    return raw === undefined || raw === "" ? fallback : raw
+}
+
+/**
+ * The ONLY hosts this worker may fetch beatmaps from: the hinai beatmap mirror
+ * (`rust-service/hinai-beatmap-mirror` in the Hinamizawa repo) by its
+ * in-cluster service names and its public hostnames. Operator ruling
+ * 2026-09-08: the renderer integrates with the hinai mirror and nothing else,
+ * so a MIRROR_BASE pointing anywhere else is a misconfiguration and the process
+ * refuses to start. Deliberately not overridable by environment.
+ */
+export const HINAI_MIRROR_HOSTS: ReadonlySet<string> = new Set([
+    "beatmap-mirror.hinai-rusty-mirror.svc.cluster.local",
+    "beatmap-mirror.hinai-rusty-mirror.svc",
+    "beatmap-mirror-ro.hinai-rusty-mirror.svc.cluster.local",
+    "stg-beatmap-mirror.staging.svc.cluster.local",
+    "mirror.hinamizawa.ai",
+    "hinamizawa.ai"
+])
+
+/** True when the URL's host is one of the hinai mirror hosts (a bad URL is false). */
+export function isHinaiMirrorUrl(url: string): boolean {
+    let host: string
+    try {
+        host = new URL(url).hostname.toLowerCase()
+    } catch {
+        return false
+    }
+    return HINAI_MIRROR_HOSTS.has(host)
+}
+
+/**
+ * `RENDER_SCOPED_KEYS`: entries `server=<sha256 hex of the key>`, separated by commas or
+ * whitespace. A request whose X-Render-Key hashes to one of these acts for that server ONLY:
+ * it queues under that server's name and sees only that server's renders, queue jobs and
+ * videos (server.ts). The hinai beatmap mirror holds one; the staff panels keep the full
+ * RENDER_API_KEY. Only digests live here, so this value is not a credential. One server may
+ * have two entries while a key is rotated. A malformed entry refuses the boot rather than
+ * silently dropping a key.
+ */
+export function parseScopedKeys(raw: string): ScopedKey[] {
+    const out: ScopedKey[] = []
+    for (const entry of raw.split(/[\s,]+/).filter(Boolean)) {
+        const eq = entry.indexOf("=")
+        const server = eq > 0 ? entry.slice(0, eq) : ""
+        const hex = eq > 0 ? entry.slice(eq + 1).toLowerCase() : ""
+        if (!SERVER_NAME.test(server) || !/^[0-9a-f]{64}$/.test(hex)) {
+            throw new Error(`RENDER_SCOPED_KEYS: every entry must be server=<64 hex chars, the SHA-256 of the key>; got an entry for ${JSON.stringify(server || entry.slice(0, 12))}`)
+        }
+        out.push({ server, hash: Buffer.from(hex, "hex") })
+    }
+    return out
+}
+
+/**
+ * A boolean environment variable: 1, true, yes or on (any case, surrounding spaces ignored) is
+ * true; anything else, or unset, is false.
+ */
+function flag(name: string): boolean {
+    const raw = (process.env[name] ?? "").trim().toLowerCase()
+    return raw === "1" || raw === "true" || raw === "yes" || raw === "on"
+}
+
+/**
+ * Everything is configured by environment. The path defaults are relative to
+ * the working directory so `npm start` works on a laptop; the Docker image
+ * points them at the /data and /work volumes.
+ */
+export function loadConfig(): Config {
+    const cwd = process.cwd()
+    const stateDir = path.resolve(str("STATE_DIR", path.join(cwd, "data", "state")))
+    const cfg: Config = {
+        port: num("PORT", 3002),
+        apiKey: str("RENDER_API_KEY", ""),
+        scopedKeys: parseScopedKeys(str("RENDER_SCOPED_KEYS", "")),
+        scopedMaxActive: Math.max(1, Math.floor(num("RENDER_SCOPED_MAX_ACTIVE", 10))),
+        minFreeBytes: Math.max(0, num("RENDER_MIN_FREE_GB", 0)) * 1024 ** 3,
+        fake: flag("RENDER_FAKE"),
+        concurrency: Math.max(1, Math.floor(num("RENDER_CONCURRENCY", 2))),
+        threadsPerSlot: Math.max(1, Math.floor(num("RENDER_THREADS_PER_SLOT", 4))),
+        timeoutMs: Math.max(1, num("RENDER_TIMEOUT_MIN", 90)) * 60_000,
+        stallMs: Math.max(30, num("RENDER_STALL_SEC", 90)) * 1000,
+        retentionDays: Math.max(1, num("RENDER_RETENTION_DAYS", 30)),
+        songCacheDays: Math.max(1, num("RENDER_SONG_CACHE_DAYS", 30)),
+        maxQueue: Math.max(1, Math.floor(num("RENDER_MAX_QUEUE", 20))),
+        maxReplayBytes: Math.max(1, num("RENDER_MAX_REPLAY_MB", 16)) * 1024 * 1024,
+        maxUploads: Math.max(1, Math.floor(num("RENDER_MAX_UPLOADS", 4))),
+        // osu! refuses uploads over 100 MB; a few older sets are larger (151 MB without
+        // video was the biggest of ~67,000 archived ones), so the default leaves room.
+        maxOszBytes: Math.max(1, num("RENDER_MAX_OSZ_MB", 256)) * 1024 * 1024,
+        mirrorBase: str("MIRROR_BASE", "http://beatmap-mirror.hinai-rusty-mirror.svc.cluster.local:6100").replace(/\/+$/, ""),
+        // The route that STREAMS the .osz. On the hinai mirror that is the
+        // CheeseGull-compatible /api/v1/hinai/d/{id}; its /d/{id} is a cascade
+        // resolver answering JSON with an upstream URL, which is not usable here.
+        mirrorDownloadPath: str("MIRROR_DOWNLOAD_PATH", "/api/v1/hinai/d/{id}"),
+        mirrorUserAgent: str("MIRROR_USER_AGENT", "ordr-render/1.0 (+https://fishy.moe)"),
+        videosDir: path.resolve(str("VIDEOS_DIR", path.join(cwd, "data", "videos"))),
+        songsDir: path.resolve(str("SONGS_DIR", path.join(cwd, "data", "songs"))),
+        skinsDir: path.resolve(str("SKINS_DIR", path.join(cwd, "data", "skins"))),
+        // The skin every render uses unless the client picks another one. The
+        // panels send `default` when their skin field is left empty, and this is
+        // what `default` means. A folder name under SKINS_DIR; unset = danser's
+        // built-in skin.
+        defaultSkin: str("RENDER_DEFAULT_SKIN", "").trim(),
+        stateDir,
+        replaysDir: path.resolve(str("REPLAYS_DIR", path.join(stateDir, "replays"))),
+        workDir: path.resolve(str("WORK_DIR", path.join(cwd, "work"))),
+        danserDir: path.resolve(str("DANSER_DIR", path.join(cwd, "bins", "danser"))),
+        danserVersion: str("DANSER_VERSION", "unknown"),
+        displayBase: Math.floor(num("XVFB_DISPLAY_BASE", 10)),
+        debug: flag("RENDER_DEBUG")
+    }
+    if (!cfg.apiKey && !cfg.fake) {
+        throw new Error("RENDER_API_KEY is not set. Refusing to start an unauthenticated renderer: set it, or set RENDER_FAKE=1 for the development stub.")
+    }
+    if (!cfg.fake && !isHinaiMirrorUrl(cfg.mirrorBase)) {
+        throw new Error(`MIRROR_BASE (${cfg.mirrorBase}) is not the hinai beatmap mirror. This renderer fetches maps from the hinai mirror only (README, "Map source"); refusing to start.`)
+    }
+    return cfg
+}
