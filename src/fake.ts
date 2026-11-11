@@ -1,10 +1,9 @@
 import fs from "fs"
-import path from "path"
 import { execFile } from "child_process"
 import { promisify } from "util"
 import { Config } from "./config"
 import { Journal, RenderRecord } from "./journal"
-import { replayPath } from "./job"
+import { replayPath, videoPath } from "./job"
 
 /** execFile as a promise, for the one ffmpeg call below. */
 const execFileAsync = promisify(execFile)
@@ -25,7 +24,7 @@ export async function runFakeJob(cfg: Config, journal: Journal, record: RenderRe
     }
     await sleep(700)
     journal.update(id, { progress: "Finalizing" })
-    const out = path.join(cfg.videosDir, `render${id}.mp4`)
+    const out = videoPath(cfg, id)
     try {
         await execFileAsync("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=30:d=1", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out], { timeout: 60_000 })
     } catch (err) {

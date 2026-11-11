@@ -3,12 +3,18 @@ import { Config } from "./config"
 import { Journal, RenderRecord } from "./journal"
 import { Json } from "./renderers/danser/prepare"
 import { DanserRun } from "./renderers/danser/render"
-import { runRenderJob, SHUTDOWN_ABORT, SlotPaths } from "./job"
+import { runRenderJob, SHUTDOWN_ABORT, SlotPaths, videoPath } from "./job"
 import { runFakeJob } from "./fake"
 import { sweepSongCache } from "./songcache"
 
 /** A slot's current job: its render id and, once danser starts, the run (so shutdown can abort it). */
 type Active = { renderID: number; run: DanserRun | null }
+
+/** The video at a render's usual path when one is there, else null (see Scheduler.sweep). */
+function videoOnDisk(cfg: Config, renderID: number): string | null {
+    const file = videoPath(cfg, renderID)
+    return fs.existsSync(file) ? file : null
+}
 
 /**
  * FIFO over the journal: every free slot takes the oldest queued render.
@@ -114,21 +120,25 @@ export class Scheduler {
 
     /**
      * Delete videos past the retention window (marking their records removed) and unused cached
-     * maps. A failed record that still names a video counts too: when the "done" write fails after
-     * the video was moved into place, the worker records the render as failed with the video kept,
-     * and without this the file would never be deleted. A video that cannot be deleted (a
-     * permission or I/O error) is logged and its record left as it is, for the next sweep: one
-     * stuck file must not stop the sweep, nor the worker, which also sweeps when it starts.
+     * maps. A failed render's video counts too, named or not. A journal written before done became
+     * final can hold a failed record that names its video. And a render whose done write never
+     * reached the disk (a full disk, then a restart) is re-queued: if that retry fails, the first
+     * video sits at the render's usual path with nothing naming it. Without this either file would
+     * never be deleted. A video that cannot be deleted (a permission or I/O error) is logged and
+     * its record left as it is, for the next sweep: one stuck file must not stop the sweep, nor the
+     * worker, which also sweeps when it starts.
      */
     sweep(): void {
         const cutoff = Date.now() - this.cfg.retentionDays * 24 * 60 * 60 * 1000
         let swept = 0
         for (const r of this.journal.all()) {
-            if (r.removed || !(r.status === "done" || (r.status === "failed" && r.videoFile))) continue
+            if (r.removed || (r.status !== "done" && r.status !== "failed")) continue
             const when = Date.parse(r.finishedAt ?? r.date)
             if (!Number.isFinite(when) || when > cutoff) continue
+            const video = r.videoFile ?? (r.status === "failed" ? videoOnDisk(this.cfg, r.renderID) : null)
+            if (r.status === "failed" && !video) continue
             try {
-                if (r.videoFile) fs.rmSync(r.videoFile, { force: true })
+                if (video) fs.rmSync(video, { force: true })
                 this.journal.update(r.renderID, { removed: true })
                 swept++
             } catch (err) {

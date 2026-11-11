@@ -1,7 +1,10 @@
 // The retention sweep (added 2026-11-10): videos past RENDER_RETENTION_DAYS are deleted and their
 // records marked removed. That covers a failed record that still names a video as well as a done
-// one: when the "done" write fails after the video was moved into place, the worker records the
-// render as failed with the video kept, and the sweep used to skip it for good. Runs against build/.
+// one: when the "done" write failed after the video was moved into place, the worker used to
+// record the render as failed with the video kept, and the sweep skipped it for good. It also
+// covers a failed record that names none while a video sits at its usual path: a done write lost
+// before a restart re-queues the render, and a failed retry leaves the first video unnamed.
+// Runs against build/.
 const test = require("node:test")
 const assert = require("node:assert/strict")
 const fs = require("fs")
@@ -43,7 +46,7 @@ test("the retention sweep deletes old videos of done records and of failed recor
     const recentFailedWithVideo = finished(journal, videosDir, 2, "failed", true)
 
     const lines = []
-    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir }
+    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir, videosDir }
     new Scheduler(cfg, journal, [], {}, (l) => lines.push(l)).sweep()
 
     /** Whether the sweep marked this render removed. */
@@ -79,7 +82,7 @@ test("a video the sweep cannot delete is left for the next sweep, and the sweep 
     const after = finished(journal, videosDir, 40, "done", true)
 
     const lines = []
-    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir }
+    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir, videosDir }
     assert.doesNotThrow(() => new Scheduler(cfg, journal, [], {}, (l) => lines.push(l)).sweep())
 
     /** Whether the sweep marked this render removed. */
@@ -89,4 +92,38 @@ test("a video the sweep cannot delete is left for the next sweep, and the sweep 
     assert.equal(removed(after), true, "records after the stuck one are still swept")
     assert.equal(fs.existsSync(after.videoFile), false)
     assert.ok(lines.some((l) => l.includes(`render ${stuck.id} for the next sweep`)), lines.join("\n"))
+})
+
+/** A failed render's first video that nothing names (its done write was lost before a restart, and the retry failed) is still swept. */
+test("an old failed record that names no video still has the video at its usual path swept", (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "retention-"))
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+    const videosDir = path.join(dir, "videos")
+    const songsDir = path.join(dir, "songs")
+    fs.mkdirSync(videosDir)
+    fs.mkdirSync(songsDir)
+    const journal = new Journal(dir)
+    journal.load()
+
+    // The first attempt's video, where a finished render puts it; the record names none.
+    const unnamed = finished(journal, videosDir, 40, "failed", false)
+    const unnamedPath = path.join(videosDir, `render${unnamed.id}.mp4`)
+    fs.writeFileSync(unnamedPath, Buffer.alloc(10))
+    const recent = finished(journal, videosDir, 2, "failed", false)
+    const recentPath = path.join(videosDir, `render${recent.id}.mp4`)
+    fs.writeFileSync(recentPath, Buffer.alloc(10))
+    const nothing = finished(journal, videosDir, 40, "failed", false)
+
+    const lines = []
+    const cfg = { fake: true, concurrency: 1, retentionDays: 30, songCacheDays: 30, songsDir, videosDir }
+    new Scheduler(cfg, journal, [], {}, (l) => lines.push(l)).sweep()
+
+    /** Whether the sweep marked this render removed. */
+    const removed = (x) => journal.all().find((r) => r.renderID === x.id).removed === true
+    assert.equal(fs.existsSync(unnamedPath), false, "the unnamed video past the window is deleted")
+    assert.equal(removed(unnamed), true)
+    assert.equal(fs.existsSync(recentPath), true, "videos inside the window stay")
+    assert.equal(removed(recent), false)
+    assert.equal(removed(nothing), false, "a failed record with no video anywhere has nothing to sweep")
+    assert.ok(lines.some((l) => /retention sweep removed 1 video/.test(l)), lines.join("\n"))
 })

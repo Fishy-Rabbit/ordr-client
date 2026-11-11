@@ -110,6 +110,11 @@ export function replayPath(cfg: Config, renderID: number): string {
     return path.join(cfg.replaysDir, `${renderID}.osr`)
 }
 
+/** Where a finished render's video lives: `<videosDir>/render<renderID>.mp4`. */
+export function videoPath(cfg: Config, renderID: number): string {
+    return path.join(cfg.videosDir, `render${renderID}.mp4`)
+}
+
 /**
  * The render options from a record's stored values: the default for each one absent, booleans read
  * leniently, the background dim clamped to 0..100 and the cursor size to 0.5..2.
@@ -418,7 +423,7 @@ export async function runRenderJob(cfg: Config, journal: Journal, record: Render
         return finishFail(outcome.errorCode, outcome.errorMessage)
     }
 
-    const finalPath = path.join(cfg.videosDir, `render${id}.mp4`)
+    const finalPath = videoPath(cfg, id)
     try {
         moveFile(outcome.videoPath, finalPath)
     } catch (err) {

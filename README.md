@@ -130,7 +130,9 @@ The floor only gates new renders; it reserves nothing for the ones already admit
 fills anyway, a journal write that fails during a render is logged and the worker keeps running. A
 failed draw-start or progress write leaves the render going; a render already done stays done; any
 other failure marks the render failed (code 21). The journal holds each change in memory and
-writes it with the next write that succeeds.
+writes it with the next write that succeeds. If the worker restarts before then, a render whose
+done write was lost is re-queued and runs again; should that retry fail, the retention sweep
+still deletes the first video, which sits at the render's usual path.
 
 ### Uploads and child processes
 
@@ -197,7 +199,7 @@ an active render from the same server answers code 29.
 | `RENDER_THREADS_PER_SLOT` | `4` | `LP_NUM_THREADS` for llvmpipe in each slot. |
 | `RENDER_TIMEOUT_MIN` | `90` | A render past this is killed and marked failed (code 21). |
 | `RENDER_STALL_SEC` | `90` | No output growth for this long is treated as a wedged danser. |
-| `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`). A video that cannot be deleted is logged and tried again at the next sweep. |
+| `RENDER_RETENTION_DAYS` | `30` | Videos older than this are deleted by the daily sweep (`removed: true`), a failed render's too, whether its record names the video or it was left at the render's usual path. A video that cannot be deleted is logged and tried again at the next sweep. |
 | `RENDER_SONG_CACHE_DAYS` | `30` | Cached `.osz` sets nobody used for this long are deleted by the same sweep (see "Map cache"). |
 | `RENDER_MAX_QUEUE` | `20` | Waiting renders before `POST /renders` answers 503 / code 40. |
 | `RENDER_MAX_REPLAY_MB` | `16` | Upload cap for the `.osr`. |
